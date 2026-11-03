@@ -154,6 +154,28 @@ in
     '';
   }];
 
+  # Mainline has no EMC devfreq governor for Tegra210, so the DRAM would sit
+  # at the 204 MHz boot clock. The Nano only has two EMC rates (204/1600
+  # MHz); pin the top one (~5x memory bandwidth). The driver still applies
+  # temperature-based refresh/derating on its own.
+  boot.kernelModules = [ "tegra210_emc" ];
+  systemd.services.emc-max-rate = {
+    description = "Run the DRAM (EMC) at 1600 MHz";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-modules-load.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      d=/sys/kernel/debug/emc
+      for i in $(seq 1 30); do [ -e $d/min_rate ] && break; sleep 1; done
+      echo 1600000000 > $d/max_rate
+      echo 1600000000 > $d/min_rate
+      echo "EMC clock: $(cat /sys/kernel/debug/clk/emc/clk_rate) Hz"
+    '';
+  };
+
   # Debug UART (UARTA, J50 header). Upstream dt aliases it to serial0 -> ttyS0.
   # Kept last so it is /dev/console and gets the serial getty.
   boot.kernelParams = [ "earlycon" "console=tty0" "console=ttyS0,115200n8" ];

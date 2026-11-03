@@ -12,7 +12,7 @@ Background and phased plan: [`jetson_nano_nixos_hermes_plan.md`](jetson_nano_nix
 | B — Mint builder | **Done.** qemu-user binfmt + `extra-platforms = aarch64-linux`; Nix daemon upgraded 2.13.1 → 2.34.9 (needed for nixpkgs 26.05). |
 | C — minimal image | **Done.** |
 | D — write & boot | **Done 2026-11-03.** Boots unattended to login + SSH; no failed units. |
-| E — qualify | Next. Open items: Ethernet links at 100 Mbit (downshift), `tegra210-emc` fails to probe (no DRAM DVFS), hostname not in router DNS yet. |
+| E — qualify | **In progress.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Open: Ethernet links at 100 Mbit (downshift; deferred), one slow (~2 min) reboot seen, Tailscale key, GitHub remote. |
 | F — Hermes | Not started. |
 
 ## Build
@@ -46,28 +46,55 @@ The root partition grows to fill the card on first boot.
 
 ## Updating a running system
 
-Once it boots (TBD — either build on the Nano or push from the laptop):
+Like the Linode, the Nano updates itself from a clone of this repo at
+`~/nixos-jetson` (GitHub, per-repo deploy key `~/.ssh/github_deploy` with
+write access, so it can also commit and push):
 
 ```bash
-# on the Nano, from a checkout:
-sudo nixos-rebuild switch --flake .#unicomplex
-# or from the laptop:
-nix run nixpkgs#nixos-rebuild -- switch --flake .#unicomplex \
-  --target-host sirhc@unicomplex --sudo
+cd ~/nixos-jetson && git pull
+rsf     # alias: sudo nixos-rebuild switch --flake ~/nixos-jetson
 ```
 
-Note: `/boot.scr` on the FAT partition and the partition-1 bootable flag are
-written only when the image is built; `nixos-rebuild` does not touch them
-(it only rewrites `/boot/extlinux/extlinux.conf` on partition 2, which
-`boot.scr` chains to).
+From the laptop (faster eval; pushes the closure):
+
+```bash
+T=$(nix build --no-link --print-out-paths .#nixosConfigurations.unicomplex.config.system.build.toplevel)
+nix copy --no-check-sigs --to ssh-ng://sirhc@<nano> $T   # ssh-ng proxy doesn't pass trust
+ssh sirhc@<nano> "sudo nix-env -p /nix/var/nix/profiles/system --set $T && sudo $T/bin/switch-to-configuration switch"
+```
+
+The bootloader install step (`system.build.installBootLoader`) runs the
+stock extlinux builder and then syncs `boot.scr` and the EMC tables onto the
+FAT partition. The partition-1 bootable flag only comes from the image
+build.
 
 ## Boot chain
 
 QSPI (CBoot → U-Boot 2020.04, default env) → distro_bootcmd scans `mmc 1`
-bootable partitions → p1 (FAT) has no extlinux.conf, runs `/boot.scr` →
-`setenv ramdisk_addr_r 0xa0000000` (RAM only) → `sysboot mmc 1:2 …
-/boot/extlinux/extlinux.conf` → NixOS generation menu → kernel + upstream
-`tegra210-p3450-0000.dtb` → systemd initrd → root `NIXOS_SD`.
+bootable partitions → p1 (FAT) has no extlinux.conf, runs `/boot.scr`, which
+(RAM only, no `saveenv`):
+
+1. `setenv ramdisk_addr_r 0xa0000000` (initrd clear of the kernel)
+2. drops `/external-memory-controller@7001b000` from `fdt_copy_node_paths`
+   (stops U-Boot replacing the upstream EMC node with L4T's)
+3. zeroes and loads `emc-nominal.bin`/`emc-derated.bin` to
+   `0x83400000`/`0x83408000`
+4. `sysboot mmc 1:2 … /boot/extlinux/extlinux.conf`
+
+→ NixOS generation menu → kernel + upstream `tegra210-p3450-0000.dtb` (+
+overlay: EMC reserved-memory regions) → systemd initrd → root `NIXOS_SD` →
+`emc-max-rate.service` pins DRAM at 1600 MHz.
+
+### Recovery
+
+If `boot.scr` is broken, interrupt U-Boot over serial and run:
+
+```
+setenv ramdisk_addr_r 0xa0000000
+sysboot mmc 1:2 any 0x90100000 /boot/extlinux/extlinux.conf
+```
+
+Older NixOS generations are in the extlinux menu (5 s timeout).
 
 ## Bring-up log
 
@@ -132,3 +159,32 @@ bootable partitions → p1 (FAT) has no extlinux.conf, runs `/boot.scr` →
 - Ethernet: RTL8168h on generic PHY driver; link
   `Downshift occurred from negotiated speed 1Gbps to actual speed 100Mbps,
   check cabling!` — check cable/switch port, then the Realtek PHY driver.
+
+### 2026-11-03 — EMC (DRAM clock) scaling
+
+- Symptom: `emc` clock stuck at 204 MHz; `tegra210-emc` probe -2;
+  `could not find phandle 480/286`. DRAM bandwidth (tools/membw.c, 4
+  threads, 64 MiB arrays): copy 2245 / scale 2213 / triad 1909 MB/s.
+- Cause: vendor U-Boot env
+  `fdt_copy_node_paths=…:/external-memory-controller@7001b000:/memory@80000000`
+  copies CBoot's L4T EMC node over the upstream one: L4T clocks list (phandles
+  from the L4T tree), L4T-format `emc-table@<ramcode>/emc-table@<khz>`
+  children, and phandle 0x21, which collides with `/i2c@7000c700`. The upstream
+  DT also lacks the `nvidia,tegra210-emc-table` reserved memory that
+  mainline expects the bootloader to fill.
+- Board RAM code 0 (`tegra-mc: … RAM code 0`). L4T has tables for RAM
+  codes 0 and 2; each has nominal + derated entries at 204000 and 1600000 kHz,
+  revision 0x7 (= mainline's r21021 sequence).
+- Fix: see Boot chain. Converter maps L4T props 1:1 onto
+  `struct tegra210_emc_timing` (4928 B; checked against the v6.18 header).
+- Result: driver probes (`available_rates 204000000 1600000000`); 50
+  transitions 204↔1600 clean; copy 11256 / scale 10986 / triad 9266 MB/s
+  (5×). memtester 2G (1 loop, all 16 tests ok) concurrently with 3-core
+  stress-ng at 1600 MHz, ~18 min: no errors; peak ~60 °C.
+- Mainline has no Tegra210 EMC devfreq governor, so `emc-max-rate.service`
+  pins 1600 MHz (the driver still handles temperature derating/refresh).
+- CPU: `cpufreq-dt`/schedutil, 204–1555.5 MHz. Under 3-core load 1.555 GHz
+  at ~40 °C (cpu-thermal).
+- One `systemctl reboot` (before the EMC change, at ~29 min uptime) stalled ~2
+  min after `shutdown[1]: Rebooting.` before TegraBoot started (both normal and
+  this one report `Power-up reason: pmc por`). Others are immediate. Watch.
