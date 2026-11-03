@@ -10,7 +10,7 @@ Background and phased plan: [`jetson_nano_nixos_hermes_plan.md`](jetson_nano_nix
 | --- | --- |
 | A — preserve working system | Skipped by decision: Ubuntu card data is disposable; card will be reused. QSPI untouched. |
 | B — Mint builder | **Done.** qemu-user binfmt + `extra-platforms = aarch64-linux`; Nix daemon upgraded 2.13.1 → 2.34.9 (needed for nixpkgs 26.05). |
-| C — minimal image | **Built, inspected.** Awaiting first boot. |
+| C — minimal image | **Built, inspected** (partitions, preboot script, extlinux.conf, DTB path, sizes). Awaiting first boot. |
 | D — write & boot | Not started. |
 | E/F — qualify, Hermes | Not started. |
 
@@ -90,3 +90,7 @@ the image is built; `nixos-rebuild` does not touch it.
 - linux-firmware `nvidia/tegra210/nvjpg.bin` is a symlink into `tegra186/`;
   copy with `cp -rL`.
 - System closure 1.6 GiB.
+- Verified image: p1 FAT `FIRMWARE` 30 MiB with `u-boot-preboot.scr`
+  (legacy script image), p2 ext4 `NIXOS_SD` flagged bootable;
+  `/boot/extlinux/extlinux.conf` has LINUX/INITRD/FDT (`tegra210-p3450-0000.dtb`)
+  and `init=` for the system closure; 5 s menu timeout.
