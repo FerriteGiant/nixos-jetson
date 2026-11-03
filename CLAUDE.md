@@ -43,7 +43,7 @@ The flake only sees git-tracked files: `git add` new files before building.
 - Serial console: `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5734003039-if00`
   (ttyACM0), 115200 8N1, Nano UARTA = `ttyS0`. pyserial is available on the laptop.
 - Network: MAC `00:04:4b:ea:d9:87`. Before NixOS: `ssh nanosaur@nanosaur`
-  (Ubuntu 18.04 / L4T 32.5.1). After NixOS: `ssh sirhc@unicomplex`.
+  (Ubuntu 18.04 / L4T 32.5.1). After NixOS: `ssh sirhc@unicomplex` (currently 192.168.17.179; name not in router DNS yet).
 - Bootloader: vendor U-Boot 2020.04 in QSPI. **Never** flash QSPI or
   `saveenv` without explicit approval; use temporary `setenv` at the U-Boot
   prompt for experiments.
@@ -51,9 +51,14 @@ The flake only sees git-tracked files: `git add` new files before building.
 ## Key constraints
 
 - U-Boot `ramdisk_addr_r=0x83200000` is only 14 MiB below
-  `kernel_addr_r=0x84000000`: the initrd must stay < 14 MiB, or override
-  `ramdisk_addr_r` at the U-Boot prompt. Hence `hardware.enableAllHardware =
-  mkForce false` and a minimal `boot.initrd.availableKernelModules`.
+  `kernel_addr_r=0x84000000` and initrd_high=~0, so the ~25 MB systemd initrd
+  would be overwritten. Fix: only SD partition 1 (FAT) is bootable and holds
+  `/boot.scr`, which sets `ramdisk_addr_r=0xa0000000` then `sysboot`s
+  partition 2's extlinux.conf. The env's `preboot` hook is NOT executed by
+  this U-Boot. `boot.scr` and the bootable flag come only from the image
+  build. `hardware.enableAllHardware` is forced off to keep the initrd lean.
+- `pgrep -f`/`pkill -f` patterns run via the Bash tool match the tool's own
+  command line; use `pgrep -f '[t]ools/nano-serial'` style patterns.
 - Kernel is the release default (`pkgs.linuxPackages`), from cache. Boot-critical
   Tegra drivers (sdhci-tegra, max77620, i2c-tegra, pci-tegra, serial) are `=y`;
   `mmc_block`, `r8169`, `xhci-tegra` are modules.

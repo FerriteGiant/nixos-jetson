@@ -2,9 +2,10 @@
 """Serial-console helper for the Jetson Nano debug UART.
 
   nano-serial.py log  SECONDS [LOGFILE]       capture console output
-  nano-serial.py uboot [CMD ...]              wait for U-Boot autoboot, stop it,
-                                              run CMDs, print output (state stays
-                                              at the U-Boot prompt)
+  nano-serial.py uboot [-f SECS] [CMD ...]    wait for U-Boot autoboot, stop it,
+                                              run CMDs, print output; with -f keep
+                                              logging SECS afterwards (e.g. after
+                                              a `boot` command)
   nano-serial.py send  LINE [SECONDS]         send one line, print reply
 
 Power-cycle/reboot the board yourself (or via ssh) before `uboot`.
@@ -50,7 +51,7 @@ def pump(s, log, seconds, until=None, echo=True):
 
 def run_uboot(s, log, cmds):
     print(">>> waiting for U-Boot autoboot prompt (reboot the board now)")
-    buf = pump(s, log, 180, until=b"Hit any key to stop autoboot")
+    buf = pump(s, log, float(os.environ.get("NANO_WAIT", 600)), until=b"Hit any key to stop autoboot")
     if b"Hit any key" not in buf:
         sys.exit("!!! never saw the autoboot prompt")
     for _ in range(5):
@@ -74,7 +75,12 @@ def main():
         if out:
             open(out, "ab").write(data)
     elif mode == "uboot":
-        run_uboot(s, log, sys.argv[2:])
+        args = sys.argv[2:]
+        follow = 0
+        if args[:1] == ["-f"]:
+            follow, args = float(args[1]), args[2:]
+        run_uboot(s, log, args)
+        pump(s, log, follow)
     elif mode == "send":
         s.write(sys.argv[2].encode() + b"\r")
         pump(s, log, float(sys.argv[3]) if len(sys.argv) > 3 else 3)

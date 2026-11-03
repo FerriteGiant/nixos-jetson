@@ -57,26 +57,36 @@
 
   # --- SD image -------------------------------------------------------------
   sdImage = {
-    # The FAT partition (SD partition 1) holds only U-Boot's preboot script:
-    # the L4T U-Boot env has
-    #   preboot=if test -e mmc 1:1 /u-boot-preboot.scr; then load ...; source ...; fi
     # Vendor ramdisk_addr_r (0x83200000) leaves 14 MiB before the kernel at
     # 0x84000000 and initrd_high=~0 means no relocation, so our ~25 MB
-    # systemd initrd would be overwritten by the kernel. Move it to
+    # systemd initrd gets overwritten by the kernel ("Initramfs unpacking
+    # failed: ZSTD-compressed data is corrupt" on first boot). Move it to
     # 0xa0000000: above the kernel (ends ~0x87eb0000), scriptaddr/pxefile
     # (0x9000000x), the XUSB fw blob (~0x92ca8000), and far below U-Boot's
     # relocated copy (~0xfc5f0000). RAM-only setenv; no saveenv, no QSPI.
+    #
+    # How: the L4T env's `preboot` hook is NOT executed by this U-Boot build,
+    # so use distro boot instead. Only partition 1 (FAT) is flagged bootable;
+    # U-Boot's scan finds no extlinux.conf there but runs /boot.scr, which
+    # fixes the address and then sysboots partition 2's extlinux.conf (still
+    # managed by nixos-rebuild as usual).
     populateFirmwareCommands =
       let
-        preboot = pkgs.writeText "u-boot-preboot.txt" ''
-          echo "unicomplex preboot: ramdisk_addr_r -> 0xa0000000"
+        bootScript = pkgs.writeText "boot.cmd" ''
+          echo "unicomplex boot.scr: ramdisk_addr_r -> 0xa0000000"
           setenv ramdisk_addr_r 0xa0000000
+          sysboot ''${devtype} ''${devnum}:2 any ''${pxefile_addr_r} /boot/extlinux/extlinux.conf
         '';
       in
       ''
         ${pkgs.buildPackages.ubootTools}/bin/mkimage -A arm64 -O linux -T script -C none \
-          -n unicomplex-preboot -d ${preboot} firmware/u-boot-preboot.scr
+          -n unicomplex-boot -d ${bootScript} firmware/boot.scr
       '';
+    # sd-image flags the root partition bootable; move the flag to the FAT one.
+    postBuildCommands = ''
+      sfdisk --no-reread --no-tell-kernel --activate $img 1
+      sfdisk --dump $img
+    '';
     populateRootCommands = ''
       mkdir -p ./files/boot
       ${config.boot.loader.generic-extlinux-compatible.populateCmd} \
