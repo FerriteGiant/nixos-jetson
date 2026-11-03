@@ -12,7 +12,7 @@ Background and phased plan: [`jetson_nano_nixos_hermes_plan.md`](jetson_nano_nix
 | B — Mint builder | **Done.** qemu-user binfmt + `extra-platforms = aarch64-linux`; Nix daemon upgraded 2.13.1 → 2.34.9 (needed for nixpkgs 26.05). |
 | C — minimal image | **Done.** |
 | D — write & boot | **Done 2026-11-03.** Boots unattended to login + SSH; no failed units. |
-| E — qualify | **In progress.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Open: Ethernet links at 100 Mbit (downshift; deferred), one slow (~2 min) reboot seen, Tailscale key, GitHub remote. |
+| E — qualify | **In progress.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Reboot hang fixed. Self-update via GitHub + Tailscale working. Open: Ethernet links at 100 Mbit (downshift; deferred), host1x DT cleanup, rollback + storage tests. |
 | F — Hermes | Not started. |
 
 ## Build
@@ -185,6 +185,30 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   pins 1600 MHz (the driver still handles temperature derating/refresh).
 - CPU: `cpufreq-dt`/schedutil, 204–1555.5 MHz. Under 3-core load 1.555 GHz
   at ~40 °C (cpu-thermal).
-- One `systemctl reboot` (before the EMC change, at ~29 min uptime) stalled ~2
-  min after `shutdown[1]: Rebooting.` before TegraBoot started (both normal and
-  this one report `Power-up reason: pmc por`). Others are immediate. Watch.
+- One `systemctl reboot` stalled ~2 min after `shutdown[1]: Rebooting.` before
+  TegraBoot started; see next section.
+
+### 2026-11-03 — Tailscale, self-update, reboot hang
+
+- Tailscale up via `/etc/tailscale-authkey` (100.86.57.92, `--ssh`).
+- GitHub `FerriteGiant/nixos-jetson` (private) with a per-repo deploy key
+  (write) generated on the Nano. `git pull && rsf` on the Nano: 71 s,
+  same store path as the laptop build. `git push --dry-run` from the Nano OK.
+- **Reboot hang:** timestamped serial (`host time` per line) showed a
+  128.2 s gap between the last kernel line and TegraBoot in slow cycles, i.e.
+  the max77620 watchdog (max timeout ~128 s, armed by systemd-shutdown)
+  rescuing a hung restart. In slow cycles the last line is
+  `tegra-xusb 70090000.usb: Firmware timestamp…` (controller being resumed
+  from runtime suspend during device shutdown); fast ones continue
+  `r8169 … Link is Down` / `kvm: exiting…` / `reboot: Restarting system`.
+  Before: 4/7 reboots slow (~190 s to SSH vs ~65 s). With
+  `70090000.usb/power/control=on` (udev rule): 10/10 immediate.
+- `reboot-cycle.sh`, 6 cycles: ~64 s reboot→SSH, `running`, no failed units,
+  EMC 1600 MHz, same 5 known err-level messages each boot.
+- Side effect of blacklisting host1x: `i2c@7000c700` (HDMI DDC) waits forever
+  for the dpaux pinmux, and `tegra-pmc`/`tegra-mc` `sync_state()` stays
+  pending. Harmless; cleaner to disable those nodes in the DT (todo).
+- From the laptop, `ssh sirhc@unicomplex` occasionally fails with `socket:
+  Address family not supported by protocol` right after a reboot (name briefly
+  resolving to an IPv6 address the laptop can't use). `ssh -4` or the Tailscale
+  IP works.
