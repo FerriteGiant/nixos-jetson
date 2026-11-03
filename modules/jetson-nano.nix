@@ -202,6 +202,15 @@ in
   # no camera input (tegra-video), and their common bus driver (host1x).
   boot.blacklistedKernelModules = [ "nouveau" "tegra_drm" "tegra_video" "host1x" ];
 
+  # Reboot hang: if the XUSB (USB3) controller is runtime-suspended when the
+  # kernel runs its shutdown pass, it gets resumed (firmware reload) and the
+  # restart hangs about half the time, until the max77620 watchdog (~128 s)
+  # resets the board. Keeping the controller out of runtime suspend fixed
+  # it (5/5 immediate resets vs ~4/7 hangs).
+  services.udev.extraRules = ''
+    ACTION=="add", SUBSYSTEM=="platform", KERNEL=="70090000.usb", ATTR{power/control}="on"
+  '';
+
   # --- SD image -------------------------------------------------------------
   sdImage = {
     populateFirmwareCommands = ''
