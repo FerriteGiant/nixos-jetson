@@ -3,24 +3,106 @@
 # 32.5.1 installed in QSPI. Upstream kernel, no GPU/CUDA stack.
 { config, lib, pkgs, modulesPath, ... }:
 
+let
+  # Physical addresses of the EMC timing tables (see boot.scr and the DT
+  # overlay below). Free since ramdisk_addr_r moved: between the CBoot DT
+  # copy at 0x83100000 and the kernel at 0x84000000.
+  emcNominalAddr = "0x83400000";
+  emcDeratedAddr = "0x83408000";
+  emcRegionSize = "0x8000"; # must match REGION_SIZE in tools/l4t-emc-to-bin.py
+
+  # L4T's non-relocatable default ramdisk_addr_r (0x83200000) leaves 14 MiB
+  # before the kernel at 0x84000000 (initrd_high=~0), so our ~25 MB systemd
+  # initrd gets overwritten by the kernel ("Initramfs unpacking failed:
+  # ZSTD-compressed data is corrupt"). 0xa0000000 is above the kernel (ends
+  # ~0x87eb0000), scriptaddr/pxefile (0x9000000x), the XUSB fw blob
+  # (~0x92ca8000), and far below U-Boot's relocated copy (~0xfc5f0000).
+  ramdiskAddr = "0xa0000000";
+
+  # The vendor default env has
+  #   fdt_copy_node_paths=...:/external-memory-controller@7001b000:/memory@80000000
+  # i.e. U-Boot replaces the upstream EMC node with L4T's (wrong clocks,
+  # L4T-format tables, and a phandle that collides with /i2c@7000c700).
+  # Same list minus the EMC node:
+  fdtCopyNodePaths = lib.concatStringsSep ":" [
+    "/chosen/plugin-manager"
+    "/chosen/reset"
+    "/chosen/display-board"
+    "/chosen/proc-board"
+    "/chosen/pmu-board"
+    "/memory@80000000"
+  ];
+
+  # The L4T env's `preboot` hook is NOT executed by this U-Boot build, so we
+  # use distro boot: only SD partition 1 (FAT) is flagged bootable; U-Boot
+  # finds no extlinux.conf there but runs /boot.scr, which adjusts the env
+  # (RAM only; no saveenv, no QSPI writes) and then sysboots partition 2's
+  # NixOS-managed extlinux.conf.
+  bootScript = pkgs.writeText "boot.cmd" ''
+    echo "unicomplex boot.scr"
+    setenv ramdisk_addr_r ${ramdiskAddr}
+    setenv fdt_copy_node_paths ${fdtCopyNodePaths}
+    mw.b ${emcNominalAddr} 0 ${emcRegionSize}
+    mw.b ${emcDeratedAddr} 0 ${emcRegionSize}
+    load ''${devtype} ''${devnum}:1 ${emcNominalAddr} /emc-nominal.bin
+    load ''${devtype} ''${devnum}:1 ${emcDeratedAddr} /emc-derated.bin
+    sysboot ''${devtype} ''${devnum}:2 any ''${pxefile_addr_r} /boot/extlinux/extlinux.conf
+  '';
+
+  # Contents of the FAT partition: boot.scr plus the EMC DVFS tables
+  # converted from L4T's DT format to mainline's binary format.
+  firmwarePartition = pkgs.runCommand "jetson-nano-firmware-partition"
+    { nativeBuildInputs = [ pkgs.buildPackages.ubootTools pkgs.buildPackages.python3 ]; }
+    ''
+      mkdir -p $out
+      mkimage -A arm64 -O linux -T script -C none -n unicomplex-boot \
+        -d ${bootScript} $out/boot.scr
+      python3 ${../tools/l4t-emc-to-bin.py} ${../hw/l4t-emc-table-ramcode0.dtsi} \
+        $out/emc-nominal.bin $out/emc-derated.bin
+    '';
+
+  # Runs after the stock extlinux installer on every `nixos-rebuild
+  # boot/switch`, so boot.scr and the EMC tables stay in sync with the config.
+  syncFirmwarePartition = pkgs.writeShellScript "sync-jetson-firmware-partition" ''
+    set -eu
+    export PATH=${lib.makeBinPath [ pkgs.coreutils pkgs.util-linux pkgs.diffutils ]}
+    dev=/dev/disk/by-label/FIRMWARE
+    [ -e "$dev" ] || { echo "jetson: $dev not found, skipping firmware sync" >&2; exit 0; }
+    mnt=$(mktemp -d)
+    mount -t vfat "$dev" "$mnt"
+    trap 'umount "$mnt"; rmdir "$mnt"' EXIT
+    for f in ${firmwarePartition}/*; do
+      n=$(basename "$f")
+      if ! cmp -s "$f" "$mnt/$n"; then
+        echo "jetson: updating FIRMWARE/$n"
+        cp "$f" "$mnt/$n.tmp" && sync && mv "$mnt/$n.tmp" "$mnt/$n"
+      fi
+    done
+    rm -f "$mnt/u-boot-preboot.scr" # obsolete
+    sync
+  '';
+in
 {
   imports = [
     "${modulesPath}/installer/sd-card/sd-image.nix"
   ];
 
   # sd-image.nix turns on enableAllHardware, which stuffs ~100 modules into
-  # the initrd. Vendor U-Boot loads the initrd only 14 MiB below the kernel
-  # (0x83200000 vs 0x84000000), so the initrd must stay small.
+  # the initrd; keep it lean.
   hardware.enableAllHardware = lib.mkForce false;
 
   nixpkgs.hostPlatform = "aarch64-linux";
 
   # --- Boot -----------------------------------------------------------------
-  # U-Boot's distro_bootcmd finds /boot/extlinux/extlinux.conf on the
-  # partition flagged bootable (sd-image flags the ext4 root partition).
   boot.loader.grub.enable = false;
   boot.loader.generic-extlinux-compatible.enable = true;
   boot.loader.generic-extlinux-compatible.configurationLimit = 10;
+  # Stock extlinux installer + FAT partition sync (see above).
+  system.build.installBootLoader = lib.mkForce (pkgs.writeShellScript "install-jetson-bootloader" ''
+    set -e
+    ${config.boot.loader.generic-extlinux-compatible.populateCmd} -c "$@"
+    ${syncFirmwarePartition}
+  '');
 
   # Default kernel of the pinned release (6.18 LTS); comes from the binary
   # cache, so nothing is compiled.
@@ -29,6 +111,48 @@
   # Emits an explicit "FDT" line in extlinux.conf so U-Boot loads the
   # upstream device tree instead of handing over the L4T one.
   hardware.deviceTree.name = "nvidia/tegra210-p3450-0000.dtb";
+
+  # EMC (DRAM clock) scaling: mainline's tegra210-emc needs the timing tables
+  # in reserved memory; boot.scr loads them there from the FAT partition.
+  hardware.deviceTree.overlays = [{
+    name = "jetson-nano-emc-tables";
+    dtsText = ''
+      /dts-v1/;
+      /plugin/;
+      / {
+        compatible = "nvidia,p3450-0000";
+
+        fragment@0 {
+          target-path = "/";
+          __overlay__ {
+            reserved-memory {
+              #address-cells = <2>;
+              #size-cells = <2>;
+              ranges;
+
+              emc_nominal: emc-table@${lib.removePrefix "0x" emcNominalAddr} {
+                compatible = "nvidia,tegra210-emc-table";
+                reg = <0x0 ${emcNominalAddr} 0x0 ${emcRegionSize}>;
+              };
+
+              emc_derated: emc-table@${lib.removePrefix "0x" emcDeratedAddr} {
+                compatible = "nvidia,tegra210-emc-table";
+                reg = <0x0 ${emcDeratedAddr} 0x0 ${emcRegionSize}>;
+              };
+            };
+          };
+        };
+
+        fragment@1 {
+          target-path = "/external-memory-controller@7001b000";
+          __overlay__ {
+            memory-region = <&emc_nominal>, <&emc_derated>;
+            memory-region-names = "nominal", "derated";
+          };
+        };
+      };
+    '';
+  }];
 
   # Debug UART (UARTA, J50 header). Upstream dt aliases it to serial0 -> ttyS0.
   # Kept last so it is /dev/console and gets the serial getty.
@@ -58,31 +182,9 @@
 
   # --- SD image -------------------------------------------------------------
   sdImage = {
-    # Vendor ramdisk_addr_r (0x83200000) leaves 14 MiB before the kernel at
-    # 0x84000000 and initrd_high=~0 means no relocation, so our ~25 MB
-    # systemd initrd gets overwritten by the kernel ("Initramfs unpacking
-    # failed: ZSTD-compressed data is corrupt" on first boot). Move it to
-    # 0xa0000000: above the kernel (ends ~0x87eb0000), scriptaddr/pxefile
-    # (0x9000000x), the XUSB fw blob (~0x92ca8000), and far below U-Boot's
-    # relocated copy (~0xfc5f0000). RAM-only setenv; no saveenv, no QSPI.
-    #
-    # How: the L4T env's `preboot` hook is NOT executed by this U-Boot build,
-    # so use distro boot instead. Only partition 1 (FAT) is flagged bootable;
-    # U-Boot's scan finds no extlinux.conf there but runs /boot.scr, which
-    # fixes the address and then sysboots partition 2's extlinux.conf (still
-    # managed by nixos-rebuild as usual).
-    populateFirmwareCommands =
-      let
-        bootScript = pkgs.writeText "boot.cmd" ''
-          echo "unicomplex boot.scr: ramdisk_addr_r -> 0xa0000000"
-          setenv ramdisk_addr_r 0xa0000000
-          sysboot ''${devtype} ''${devnum}:2 any ''${pxefile_addr_r} /boot/extlinux/extlinux.conf
-        '';
-      in
-      ''
-        ${pkgs.buildPackages.ubootTools}/bin/mkimage -A arm64 -O linux -T script -C none \
-          -n unicomplex-boot -d ${bootScript} firmware/boot.scr
-      '';
+    populateFirmwareCommands = ''
+      cp ${firmwarePartition}/* firmware/
+    '';
     # sd-image flags the root partition bootable; move the flag to the FAT one.
     postBuildCommands = ''
       sfdisk --no-reread --no-tell-kernel --activate $img 1
