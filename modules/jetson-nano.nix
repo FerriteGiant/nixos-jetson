@@ -52,8 +52,9 @@
   ];
 
   # --- No GPU ---------------------------------------------------------------
-  # Headless; don't let nouveau try to drive the GM20B GPU.
-  boot.blacklistedKernelModules = [ "nouveau" ];
+  # Headless: no GPU (nouveau), no display controller / HDMI (tegra-drm),
+  # no camera input (tegra-video), and their common bus driver (host1x).
+  boot.blacklistedKernelModules = [ "nouveau" "tegra_drm" "tegra_video" "host1x" ];
 
   # --- SD image -------------------------------------------------------------
   sdImage = {
