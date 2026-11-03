@@ -46,8 +46,8 @@
   hardware.firmware = [
     (pkgs.runCommand "jetson-nano-firmware" { } ''
       mkdir -p $out/lib/firmware/nvidia
-      cp -r ${pkgs.linux-firmware}/lib/firmware/nvidia/tegra210 $out/lib/firmware/nvidia/
-      cp -r ${pkgs.linux-firmware}/lib/firmware/rtl_nic $out/lib/firmware/
+      cp -rL ${pkgs.linux-firmware}/lib/firmware/nvidia/tegra210 $out/lib/firmware/nvidia/
+      cp -rL ${pkgs.linux-firmware}/lib/firmware/rtl_nic $out/lib/firmware/
     '')
   ];
 
@@ -57,8 +57,26 @@
 
   # --- SD image -------------------------------------------------------------
   sdImage = {
-    # The FAT "firmware" partition is a Raspberry Pi thing; leave it empty.
-    populateFirmwareCommands = "";
+    # The FAT partition (SD partition 1) holds only U-Boot's preboot script:
+    # the L4T U-Boot env has
+    #   preboot=if test -e mmc 1:1 /u-boot-preboot.scr; then load ...; source ...; fi
+    # Vendor ramdisk_addr_r (0x83200000) leaves 14 MiB before the kernel at
+    # 0x84000000 and initrd_high=~0 means no relocation, so our ~25 MB
+    # systemd initrd would be overwritten by the kernel. Move it to
+    # 0xa0000000: above the kernel (ends ~0x87eb0000), scriptaddr/pxefile
+    # (0x9000000x), the XUSB fw blob (~0x92ca8000), and far below U-Boot's
+    # relocated copy (~0xfc5f0000). RAM-only setenv; no saveenv, no QSPI.
+    populateFirmwareCommands =
+      let
+        preboot = pkgs.writeText "u-boot-preboot.txt" ''
+          echo "unicomplex preboot: ramdisk_addr_r -> 0xa0000000"
+          setenv ramdisk_addr_r 0xa0000000
+        '';
+      in
+      ''
+        ${pkgs.buildPackages.ubootTools}/bin/mkimage -A arm64 -O linux -T script -C none \
+          -n unicomplex-preboot -d ${preboot} firmware/u-boot-preboot.scr
+      '';
     populateRootCommands = ''
       mkdir -p ./files/boot
       ${config.boot.loader.generic-extlinux-compatible.populateCmd} \
