@@ -73,6 +73,17 @@
     trusted-users = [ "sirhc" ]; # allow pushing closures built on the laptop
   };
 
+  # Keep the store from growing forever: weekly, drop generations older than
+  # 14 days (the rollback window; the boot menu keeps at most 10) and collect
+  # unreferenced paths, then hard-link identical files. Timers are persistent,
+  # so a run missed while powered off happens at the next boot.
+  nix.gc = {
+    automatic = true;
+    dates = "weekly";
+    options = "--delete-older-than 14d";
+  };
+  nix.optimise.automatic = true;
+
   # Building these under emulation is slow and they're not needed headless.
   documentation.nixos.enable = false;
   programs.command-not-found.enable = false;
