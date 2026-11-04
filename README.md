@@ -43,6 +43,7 @@ The root partition grows to fill the card on first boot.
 | SSH | `ssh sirhc@192.168.17.179` (key only; DHCP on `eth0`, MAC `00:04:4b:ea:d9:87`). `unicomplex` doesn't resolve via the router yet. |
 | Serial | `tools/nano-serial.py` — UARTA/J50, 115200 8N1, `ttyS0`; login `sirhc` / temporary password `unicomplex` (change it) |
 | sudo | passwordless for wheel during bring-up |
+| Health | `voltage [-w]` (INA3221 rails V/mA/mW), `bootreason [N]` (reset reason of the last N boots), `journalctl -u vdd-in-monitor -p warning` (supply dips) |
 
 ## Updating a running system
 
