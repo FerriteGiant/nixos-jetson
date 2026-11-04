@@ -17,10 +17,25 @@ let
         printf "%-8s %5d.%02d V  %5d mA  %6d mW\n" "$l" $((mv / 1000)) $((mv % 1000 / 10)) "$ma" $((mv * ma / 1000))
       done
     }
+    # Supply dips logged by vdd-in-monitor this boot: warnings + recovery
+    # notices (priority notice and above; skips startup/summary info lines).
+    events() {
+      ev=$(${pkgs.systemd}/bin/journalctl -b -u vdd-in-monitor -p notice -o short-iso \
+             --no-pager -q 2>/dev/null | sed -E 's/^([0-9-]+)T([0-9:]+)[^ ]* [^ ]+ [^:]+: /\1 \2  /')
+      n=$(printf '%s\n' "$ev" | grep -c .)
+      echo
+      if [ "$n" -eq 0 ]; then
+        echo "Supply warnings this boot: none"
+      else
+        echo "Supply warnings this boot: $n event(s), latest 5:"
+        printf '%s\n' "$ev" | tail -n 5 | sed 's/^/  /'
+      fi
+    }
     if [ "''${1:-}" = -w ]; then
-      while :; do clear; date; show; sleep 1; done
+      while :; do out=$(date; show; events); clear; printf '%s\n' "$out"; sleep 1; done
     else
       show
+      events
     fi
   '';
 
