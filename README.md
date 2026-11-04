@@ -235,7 +235,10 @@ rsf        # alias for: sudo nixos-rebuild switch --flake ~/nixos-jetson
 
 A rebuild on the Nano takes about a minute, since packages come from the
 binary cache, and gives the same result as building on another machine. Old
-generations stay in the boot menu for rollback.
+generations stay in the boot menu for rollback. A weekly garbage collection
+drops generations older than 14 days (that's the rollback window; the boot
+menu shows at most 10) and anything unreferenced, then deduplicates the
+store.
 
 ### Health commands
 
