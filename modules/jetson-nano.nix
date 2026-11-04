@@ -217,7 +217,7 @@ in
   # at the 204 MHz boot clock. The Nano only has two EMC rates (204/1600
   # MHz); pin the top one (~5x memory bandwidth). The driver still applies
   # temperature-based refresh/derating on its own.
-  boot.kernelModules = [ "tegra210_emc" ];
+  boot.kernelModules = [ "tegra210_emc" "i2c-dev" ]; # i2c-dev: PMIC power-off hook
   systemd.services.emc-max-rate = {
     description = "Run the DRAM (EMC) at 1600 MHz";
     wantedBy = [ "multi-user.target" ];
@@ -290,7 +290,9 @@ in
       msg=$(printf "PMIC NVERC=0x%02x%s; Tegra PMC reset: %s (0x%s)" $v "''${bits:+ ->$bits}" "$why" "$pmc")
       if [ $(( v & 0x7a )) -ne 0 ]; then
         echo "<4>$msg"
-        [ $(( v & 0x50 )) -ne 0 ] && echo "<4>input power dropped: brownout, unless the board was unplugged"
+        if [ $(( v & 0x50 )) -ne 0 ]; then
+          echo "<4>input power dropped: brownout, unless the board was unplugged"
+        fi
       else
         echo "<6>$msg (clean)"
       fi
@@ -320,6 +322,28 @@ in
       DynamicUser = true; # only reads sysfs
     };
   };
+
+  # Power-off: Linux's PSCI SYSTEM_OFF call isn't implemented by the L4T
+  # secure firmware ("Tegra System Off: operation not handled", EL3 panic);
+  # the board hangs until the bootloader-enabled PMIC watchdog reboots it
+  # (~80 s later, NVERC 0x02). The max77620 driver's own power-off handler
+  # is never installed because PSCI already claims pm_power_off. So power
+  # off the PMIC from a systemd-shutdown hook instead (same register write
+  # the driver would do: ONOFFCNFG1 0x41, SFT_RST bit 7). Reboots unaffected.
+  systemd.shutdownRamfs.contents."/lib/systemd/system-shutdown/jetson-pmic-poweroff".source =
+    pkgs.writeShellScript "jetson-pmic-poweroff" ''
+      [ "$1" = poweroff ] || exit 0
+      export PATH=${lib.makeBinPath [ pkgs.i2c-tools pkgs.coreutils ]}
+      bus=""
+      for d in /sys/bus/i2c/devices/*-003c; do
+        [ "$(tr -d '\0' < "$d/of_node/compatible" 2>/dev/null)" = "maxim,max77620" ] && bus=''${d##*/} && bus=''${bus%%-*}
+      done
+      [ -n "$bus" ] || { echo "jetson-pmic-poweroff: PMIC not found" > /dev/kmsg; exit 0; }
+      v=$(i2cget -f -y "$bus" 0x3c 0x41) || exit 0
+      echo "jetson-pmic-poweroff: PMIC on i2c-$bus, ONOFFCNFG1=$v -> setting SFT_RST" > /dev/kmsg
+      sync
+      i2cset -f -y "$bus" 0x3c 0x41 $(( v | 0x80 ))
+    '';
 
   # Reboot hang: if the XUSB (USB3) controller is runtime-suspended when the
   # kernel runs its shutdown pass, it gets resumed (firmware reload) and the
