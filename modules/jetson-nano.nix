@@ -296,6 +296,30 @@ in
     '';
   };
 
+  # Supply monitor: INA3221 VDD_IN at 5 Hz, 1 s moving average; warns below
+  # 4.7 V (clears above 4.75 V), reminds at most once a minute while low,
+  # hourly info summary. journalctl -u vdd-in-monitor -p warning
+  systemd.services.vdd-in-monitor = {
+    description = "Monitor 5 V input (VDD_IN) for supply dips";
+    wantedBy = [ "multi-user.target" ];
+    path = [ pkgs.coreutils ];
+    environment = {
+      LOW_MV = "4700";
+      CLEAR_MV = "4750";
+      WINDOW = "5";
+      PERIOD = "0.2";
+      REMIND_S = "60";
+      SUMMARY_S = "3600";
+    };
+    serviceConfig = {
+      ExecStart = "${pkgs.bash}/bin/bash ${./vdd-in-monitor.sh}";
+      Restart = "always";
+      RestartSec = 10;
+      Nice = 10;
+      DynamicUser = true; # only reads sysfs
+    };
+  };
+
   # Reboot hang: if the XUSB (USB3) controller is runtime-suspended when the
   # kernel runs its shutdown pass, it gets resumed (firmware reload) and the
   # restart hangs about half the time, until the max77620 watchdog (~128 s)
