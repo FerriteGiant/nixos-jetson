@@ -238,3 +238,25 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   write 341 IOPS. 2 GiB urandom write → drop caches → sha256 read-back match.
   No mmc/ext4/I/O errors. Random-write IOPS are the weak spot; consider a USB
   SSD for Hermes state (plan, phase E/F).
+
+### 2026-11-04 — brownout / reset-reason detection
+
+- TegraBoot prints the MAX77620 **NVERC** (non-volatile event recorder) every
+  boot: `pmic max77620 NVERC : 0x..`. Observed values matched events:
+  `0x00` every clean software reboot; `0x02` (WTCHDG) both 128 s watchdog
+  reboots; `0x40` (MBU, input undervoltage) and `0x50` (MBU + MBLSD,
+  low-input shutdown) after pulling the power plug. **A brownout shows as
+  0x40/0x10 on a boot where nobody pulled the plug**; it can't be told apart
+  from a deliberate unplug.
+- Linux reads NVERC (`i2cget -f -y 1 0x3c 0x0c`) as `0x00` even right after
+  a plug cycle → TegraBoot clears it before Linux. Tegra PMC `reset_reason`
+  (sysfs) says `POWER_ON_RESET` for plug cycles and soft reboots alike (soft
+  reboot goes through a PMIC power cycle), so it doesn't discriminate.
+- U-Boot has the `i2c` command; PMIC is U-Boot **bus 0** (`i2c@7000d000`,
+  chip 0x3c). Untested: whether `i2c dev 0; i2c md 0x3c 0x0c 1` still sees
+  the value after TegraBoot (if yes, boot.scr could pass it to Linux on the
+  kernel cmdline), and whether CBoot's DT (`fdt addr ${fdt_copy_src_addr};
+  fdt print /chosen`) carries it. Needs one plug cycle with
+  `tools/nano-serial.py uboot …` listening.
+- Until then: serial console output is the only record. INA3221 power
+  monitor (likely on `i2c@7000c400`, disabled upstream) not yet tried.
