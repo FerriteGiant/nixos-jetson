@@ -11,9 +11,6 @@ are deliberately left off.
 - [2. Installation](#2-installation)
 - [3. How it was worked out](#3-how-it-was-worked-out)
 
-Detailed, dated engineering notes (raw measurements, addresses, logs) are
-in [`docs/bringup-log.md`](docs/bringup-log.md).
-
 ---
 
 ## 1. What works
@@ -318,8 +315,7 @@ Ubuntu image) to the system described above. The SD card gets erased.
 ## 3. How it was worked out
 
 Every change was tested on the hardware, one at a time, with the serial
-console captured from power-on. The detailed notes are in
-[`docs/bringup-log.md`](docs/bringup-log.md).
+console captured from power-on.
 
 **Starting point.** The existing NVIDIA image showed which bootloader was in
 QSPI (L4T 32.5.1: CBoot + U-Boot 2020.04). U-Boot's environment and memory

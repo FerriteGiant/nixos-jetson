@@ -1,5 +1,5 @@
 {
-  description = "NixOS configuration for unicomplex (original Jetson Nano, P3450 B01)";
+  description = "Headless NixOS for the original Jetson Nano developer kit (P3450, mainline kernel)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
