@@ -249,9 +249,9 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   0x40/0x10 on a boot where nobody pulled the plug**; it can't be told apart
   from a deliberate unplug.
 - Linux reads NVERC (`i2cget -f -y 1 0x3c 0x0c`) as `0x00` even right after
-  a plug cycle → TegraBoot clears it before Linux. Tegra PMC `reset_reason`
-  (sysfs) says `POWER_ON_RESET` for plug cycles and soft reboots alike (soft
-  reboot goes through a PMIC power cycle), so it doesn't discriminate.
+  a plug cycle → TegraBoot clears it before Linux. The Tegra PMC sysfs
+  `reset_reason` does distinguish `POWER_ON_RESET` (plug cycle) from
+  `SW_MAIN` (software reboot), but can't say *why* power went away; NVERC can.
 - U-Boot `i2c dev 0; i2c md 0x3c 0x0c 1` also reads 0x00 (cleared). But
   CBoot's DT (`fdt addr ${fdt_copy_src_addr}; fdt print /chosen`) has
   `reset { pmic_reset_status = <0x40>; pmc_reset_status = <0x0>; }`, and
