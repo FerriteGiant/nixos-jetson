@@ -25,7 +25,7 @@ are deliberately left off.
 | Bootloader | NVIDIA's stock CBoot + U-Boot in QSPI; untouched, nothing saved to its environment |
 | CPU | 4× Cortex-A57, frequency scaling 204 MHz – 1.55 GHz |
 | RAM | 4 GB LPDDR4 at **1600 MHz**, about 11 GB/s copy bandwidth |
-| Storage | Root filesystem on the SD card (ext4) |
+| Storage | Root, `/nix` and `/boot` on the SD card (ext4); optional USB SSD (btrfs) for app data, logs, swap and snapshots |
 | Network | Gigabit Ethernet (DHCP); optional Tailscale |
 | Not used | GPU, display/HDMI, camera; disabled in the device tree |
 
@@ -39,6 +39,7 @@ rollback to older generations have all been tested (section 3).
 flake.nix                           nixosConfigurations.<host> + packages.aarch64-linux.sdImage
 common-configuration.nix            user, SSH, Tailscale, sudo, nix settings, packages
 hosts/<host>/configuration.nix      hostname and host-specific hardware quirks
+hosts/<host>/storage.nix            optional USB SSD: mounts, swap, snapshots, trim, scrub
 modules/jetson-nano.nix             everything board-specific (boot, DT overlays, services)
 modules/board-commands.nix          `voltage` and `bootreason`
 modules/vdd-in-monitor.sh           supply-dip monitor
@@ -164,6 +165,37 @@ Only the bus that hosts the power monitor stays enabled. Disabling the nodes
 rather than just blocking the drivers lets the kernel finish its power-domain
 cleanup instead of waiting forever for devices that will never probe.
 
+### Optional USB SSD
+
+The SD card's random-write performance is the bottleneck for databases and
+logs, so a USB 3 SSD (btrfs) takes the write-heavy parts. The system itself
+(`/`, `/nix`, `/boot`) stays on the SD card, so **the Nano still boots
+without the SSD**; every SSD mount is `nofail`.
+
+| Subvolume | Mounted at | Purpose |
+| --- | --- | --- |
+| `@hermes` | `/var/lib/hermes` | Application state, snapshotted hourly |
+| `@log` | `/var/log` | Journal and other logs (journal capped at 2 GiB) |
+| `@swap` | `/swap` | 4 GiB swap file, used only after zram |
+| `@snapshots` | (via `/mnt/ssd`) | Snapshot target |
+
+- **Mount options:** `noatime,compress=zstd:1`; btrfs enables
+  `discard=async` by itself once TRIM works.
+- **Snapshots:** btrbk takes hourly read-only snapshots of `@hermes`,
+  keeping 48 hourly, 14 daily, 8 weekly and 6 monthly.
+- **Maintenance:** `fstrim` runs weekly on all filesystems; `btrfs scrub`
+  runs monthly on the SSD.
+- **Why `/var/log` is special:** NixOS mounts `/var/log` from the initrd,
+  which has no USB storage. So it's a plain systemd mount unit instead.
+  The journal is held in RAM until the SSD mounts, about 25 s into boot, or
+  for the whole boot if the SSD is missing. Nothing is written to the SD
+  card underneath.
+- **TRIM quirk:** some USB-SATA bridges advertise UNMAP but report thin
+  provisioning as off, so Linux disables discard. If `lsblk -D` shows
+  `DISC-MAX 0B` on a drive that supports TRIM, a udev rule forcing
+  `provisioning_mode=unmap` (see `hosts/<host>/configuration.nix`) fixes
+  it. Verify with `fstrim` and a checksum test before relying on it.
+
 ### Access and updates
 
 - **SSH:** key-only login for the user defined in `common-configuration.nix`;
@@ -282,6 +314,20 @@ Ubuntu image) to the system described above. The SD card gets erased.
      a key on the Nano (`ssh-keygen -t ed25519 -f ~/.ssh/github_deploy`), add
      it to that repo as a deploy key, and clone the repo to `~/nixos-jetson`.
    - Change the password with `passwd`.
+   - Optional USB SSD: format it as btrfs (or use an existing btrfs), put
+     its UUID in `hosts/<host>/storage.nix`, then, once, on the Nano:
+
+     ```bash
+     sudo mount -o subvolid=5 /dev/disk/by-uuid/<uuid> /mnt
+     cd /mnt && for s in @hermes @log @swap @snapshots; do sudo btrfs subvolume create $s; done
+     sudo btrfs filesystem mkswapfile --size 4g @swap/swapfile
+     sudo journalctl --rotate && sudo cp -a /var/log/. /mnt/@log/
+     cd / && sudo umount /mnt
+     ```
+
+     Then `nixos-rebuild boot` and reboot. Afterwards the old `/var/log` on
+     the SD card is hidden under the mount; bind-mount `/` elsewhere to delete
+     it.
 7. **Check:** `bootreason`, `voltage`, `systemctl --failed`, and the memory
    clock should read 1600000000 (see Health commands).
 
@@ -398,8 +444,27 @@ load.
 - Rollback was tested by picking an old generation from the boot menu over
   serial.
 - The SD card passed fio and a write/read-back checksum test. Its
-  random-write performance is the main bottleneck for write-heavy workloads,
-  so a USB SSD is worth adding for application data.
+  random-write performance is the main bottleneck for write-heavy workloads.
+
+**USB SSD.** A SATA SSD in a USB 3 enclosure was validated before any data
+went on it.
+- SMART health, fio, a write/read-back checksum and btrfs scrubs all passed.
+  Random writes were about 8× the SD card's.
+- The power monitor confirmed the supply stays in spec with the SSD writing
+  under full CPU load.
+- The enclosure advertised UNMAP but reported thin provisioning off.
+  Forcing `provisioning_mode=unmap` worked: a full `fstrim`, with the
+  checksum and scrub still clean afterwards.
+- The first udev rule set it on the SCSI device, which the kernel then
+  reset while revalidating the disk. Applying it on the block device's add
+  event fixed that.
+- smartctl's NVMe-over-USB probe modes made this bridge hang for 60 s and
+  reset. The standard SAT mode works.
+- For the layout, keeping the system on the SD card (data, logs, swap and
+  snapshots only on the SSD) was chosen over moving `/nix` or root, so a
+  failed SSD can't make the Nano unbootable.
+- That's also how the NixOS detail surfaced: `/var/log` is always mounted
+  from the initrd, which is why it uses a plain systemd mount unit.
 
 **Tools** in `tools/`:
 
