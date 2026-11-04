@@ -296,3 +296,11 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   itself was logged by pmic-reset-reason as `NVERC=0x40 -> MBU`, as expected.
 - VDD_GPU 0 mA (GPU power-gated); VDD_CPU ≈ 100 mA idle. Shunt values are
   L4T's; bus voltages don't depend on them, currents do.
+- **`vdd-in-monitor.service`** (`modules/vdd-in-monitor.sh`): samples VDD_IN
+  at 5 Hz, 1 s moving average (5 samples); warning when the average drops
+  below **4700 mV**, clears above 4750 mV (hysteresis), reminder at most
+  once a minute while low (with the lowest average), notice on recovery
+  (duration + lowest), info summary hourly. ~0.7 % of one core. Thresholds
+  are env vars in `modules/jetson-nano.nix`. Test with raised thresholds
+  (5050/5080) + stress burst produced exactly: warn → reminders → recovered →
+  summary. Check: `journalctl -u vdd-in-monitor -p warning`.
