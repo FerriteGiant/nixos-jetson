@@ -48,6 +48,16 @@ The flake only sees git-tracked files: `git add` new files before building.
   `saveenv` without explicit approval; use temporary `setenv` at the U-Boot
   prompt for experiments.
 
+## Tools
+
+- `tools/nano-serial.py` — serial console: `log`, `uboot [-f SECS] CMD…`, `send`
+- `tools/reboot-cycle.sh [N] [HOST]` — timed reboots + health line per cycle
+- `tools/boot-menu-pick.py N [HOST]` — reboot and pick extlinux entry N (rollback)
+- `tools/l4t-emc-to-bin.py` — L4T EMC DT tables → mainline binary (used by the build)
+- `tools/membw.c` — DRAM bandwidth check (expect ~11 GB/s copy at 1600 MHz)
+
+Only one process may read the serial port at a time (readers split the data).
+
 ## Key constraints
 
 - U-Boot `ramdisk_addr_r=0x83200000` is only 14 MiB below
