@@ -12,7 +12,7 @@ Background and phased plan: [`jetson_nano_nixos_hermes_plan.md`](jetson_nano_nix
 | B — Mint builder | **Done.** qemu-user binfmt + `extra-platforms = aarch64-linux`; Nix daemon upgraded 2.13.1 → 2.34.9 (needed for nixpkgs 26.05). |
 | C — minimal image | **Done.** |
 | D — write & boot | **Done 2026-11-03.** Boots unattended to login + SSH; no failed units. |
-| E — qualify | **In progress.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Reboot hang fixed. Self-update via GitHub + Tailscale working. Ethernet fixed (bad cable; now 1 Gbit/s). Open: host1x DT cleanup, rollback + storage tests. |
+| E — qualify | **Done 2026-11-04.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Reboot hang fixed. Self-update via GitHub + Tailscale working. Ethernet 1 Gbit/s (cable). Headless DT cleanup. Rollback via boot menu, storage stress + integrity OK. |
 | F — Hermes | Not started. |
 
 ## Build
@@ -223,3 +223,18 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   firmware is supported by the kernel). EEE not supported.
 - Throughput: 32.7 MB NAR from cache.nixos.org at up to 71.7 MB/s (~573
   Mbit/s; WAN/CDN-limited). `ethtool -S` error/drop counters all zero.
+
+### 2026-11-04 — headless DT cleanup, rollback, storage
+
+- DT overlay disables `/host1x@50000000`, `/i2c@7000c700`, `/mipi@700e3000`:
+  no more deferred probes or pending `sync_state()`. Remaining err-level
+  messages each boot (cosmetic): 4× `tegra-clk-debug: … connection ID is
+  greater than 16`, 1× `max77620 … Failed to create device link`.
+- Rollback: `tools/boot-menu-pick.py 4` selected generation 4 in the extlinux
+  menu over serial; `/run/booted-system` = gen 4 (own DTB, no udev fix:
+  `power/control=auto`). Plain reboot returned to the default (gen 6).
+- SD card (`USD00`, 58.2 GiB, 02/2020) at UHS-I SDR104. fio direct I/O: seq
+  write 38.5 MB/s, seq read 83.6 MB/s, 4K rand read 1714 IOPS (QD32), 4K rand
+  write 341 IOPS. 2 GiB urandom write → drop caches → sha256 read-back match.
+  No mmc/ext4/I/O errors. Random-write IOPS are the weak spot; consider a USB
+  SSD for Hermes state (plan, phase E/F).
