@@ -284,7 +284,15 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   | stress-ng 4 CPU + 2 vm (256M) | **4.536** / 4.589 V | 1128 / 1360 mA | ~5.2 W |
 
   ~0.13 V sag for ~0.6 A → ~0.2 Ω source + cable resistance. Already below
-  5 V −5 % (4.75 V) at idle. An SSD (~0.5–1 A more) would push it lower: use
-  a 5 V 4 A barrel supply (J48 jumper) before attaching one.
+  5 V −5 % (4.75 V) at idle. An SSD (~0.5–1 A more) would push it lower.
+- **Switched to the 5 V barrel jack (J48)**, same test:
+
+  | | V min / mean | I mean / max | P |
+  |---|---|---|---|
+  | idle | 5.088 / 5.096 V | 492 / 760 mA | ~2.5 W |
+  | stress-ng 4 CPU + 2 vm (256M) | **4.968** / 5.009 V | 1042 / 1256 mA | ~5.2 W |
+
+  In spec under load with ~0.2 V margin; ~0.09 V sag per ~0.55 A. The swap
+  itself was logged by pmic-reset-reason as `NVERC=0x40 -> MBU`, as expected.
 - VDD_GPU 0 mA (GPU power-gated); VDD_CPU ≈ 100 mA idle. Shunt values are
   L4T's; bus voltages don't depend on them, currents do.
