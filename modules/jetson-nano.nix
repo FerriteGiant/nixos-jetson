@@ -242,7 +242,11 @@ in
                "0x20 MBO(input-overvoltage)" "0x40 MBU(input-undervoltage)" "0x80 RSTIN(reset-input)"; do
         m=''${b%% *}; [ $(( v & m )) -ne 0 ] && bits="$bits ''${b#* }"
       done
-      msg=$(printf "PMIC NVERC=0x%02x%s (PMC reset status 0x%s)" $v "''${bits:+ ->$bits}" "$pmc")
+      case $(( 0x''${pmc:-0} )) in
+        0) why=power-on ;; 1) why=watchdog ;; 2) why=thermal-sensor ;;
+        3) why=software-reboot ;; 4) why=lp0-wake ;; *) why=unknown ;;
+      esac
+      msg=$(printf "PMIC NVERC=0x%02x%s; Tegra PMC reset: %s (0x%s)" $v "''${bits:+ ->$bits}" "$why" "$pmc")
       if [ $(( v & 0x7a )) -ne 0 ]; then
         echo "<4>$msg"
         [ $(( v & 0x50 )) -ne 0 ] && echo "<4>input power dropped: brownout, unless the board was unplugged"
