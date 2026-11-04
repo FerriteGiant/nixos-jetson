@@ -152,6 +152,24 @@ in
         };
       };
     '';
+  }
+    # Headless: disable the display/camera side in the DT too (the modules are
+    # blacklisted below). Otherwise fw_devlink keeps waiting for them:
+    # i2c@7000c700 (HDMI DDC) needs the dpaux pinmux under host1x, and
+    # tegra-pmc/tegra-mc sync_state() (powering off unused domains) stays
+    # pending on host1x and the MIPI calibration block.
+  {
+    name = "jetson-nano-headless";
+    dtsText = ''
+      /dts-v1/;
+      /plugin/;
+      / {
+        compatible = "nvidia,p3450-0000";
+        fragment@0 { target-path = "/host1x@50000000"; __overlay__ { status = "disabled"; }; };
+        fragment@1 { target-path = "/i2c@7000c700";    __overlay__ { status = "disabled"; }; };
+        fragment@2 { target-path = "/mipi@700e3000";   __overlay__ { status = "disabled"; }; };
+      };
+    '';
   }];
 
   # Mainline has no EMC devfreq governor for Tegra210, so the DRAM would sit
