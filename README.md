@@ -252,11 +252,19 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   a plug cycle → TegraBoot clears it before Linux. Tegra PMC `reset_reason`
   (sysfs) says `POWER_ON_RESET` for plug cycles and soft reboots alike (soft
   reboot goes through a PMIC power cycle), so it doesn't discriminate.
-- U-Boot has the `i2c` command; PMIC is U-Boot **bus 0** (`i2c@7000d000`,
-  chip 0x3c). Untested: whether `i2c dev 0; i2c md 0x3c 0x0c 1` still sees
-  the value after TegraBoot (if yes, boot.scr could pass it to Linux on the
-  kernel cmdline), and whether CBoot's DT (`fdt addr ${fdt_copy_src_addr};
-  fdt print /chosen`) carries it. Needs one plug cycle with
-  `tools/nano-serial.py uboot …` listening.
-- Until then: serial console output is the only record. INA3221 power
-  monitor (likely on `i2c@7000c400`, disabled upstream) not yet tried.
+- U-Boot `i2c dev 0; i2c md 0x3c 0x0c 1` also reads 0x00 (cleared). But
+  CBoot's DT (`fdt addr ${fdt_copy_src_addr}; fdt print /chosen`) has
+  `reset { pmic_reset_status = <0x40>; pmc_reset_status = <0x0>; }`, and
+  `/chosen/reset` is in `fdt_copy_node_paths`, so Linux sees it at
+  `/proc/device-tree/chosen/reset/`. **`pmic-reset-reason.service`** decodes
+  and logs it each boot (warning level for watchdog/thermal/undervoltage):
+  - plug cycle: `PMIC NVERC=0x40 -> MBU(input-undervoltage); Tegra PMC reset:
+    power-on (0x00000000)` + `input power dropped: brownout, unless the board
+    was unplugged`
+  - `systemctl reboot`: `PMIC NVERC=0x00; Tegra PMC reset: software-reboot
+    (0x00000003) (clean)`
+  - Check with `journalctl -b -u pmic-reset-reason` (or `-b -1` etc.).
+- NVERC bit names beyond the observed 0x02/0x10/0x40 are from the MAX77620
+  register description, not observed here.
+- INA3221 power monitor (likely on `i2c@7000c400`, disabled upstream) not yet
+  tried.
