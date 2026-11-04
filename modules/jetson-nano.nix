@@ -4,6 +4,21 @@
 { config, lib, pkgs, modulesPath, ... }:
 
 let
+  # PMIC power-off for systemd-shutdown (see "Power-off" below).
+  pmicPowerOff = pkgs.writeShellScript "jetson-pmic-poweroff" ''
+    [ "$1" = poweroff ] || exit 0
+    export PATH=${lib.makeBinPath [ pkgs.i2c-tools pkgs.coreutils ]}
+    bus=""
+    for d in /sys/bus/i2c/devices/*-003c; do
+      [ "$(tr -d '\0' < "$d/of_node/compatible" 2>/dev/null)" = "maxim,max77620" ] && bus=''${d##*/} && bus=''${bus%%-*}
+    done
+    [ -n "$bus" ] || { echo "jetson-pmic-poweroff: PMIC not found" > /dev/kmsg; exit 0; }
+    v=$(i2cget -f -y "$bus" 0x3c 0x41) || exit 0
+    echo "jetson-pmic-poweroff: PMIC on i2c-$bus, ONOFFCNFG1=$v -> setting SFT_RST" > /dev/kmsg
+    sync
+    i2cset -f -y "$bus" 0x3c 0x41 $(( v | 0x80 ))
+  '';
+
   # Physical addresses of the EMC timing tables (see boot.scr and the DT
   # overlay below). Free since ramdisk_addr_r moved: between the CBoot DT
   # copy at 0x83100000 and the kernel at 0x84000000.
@@ -325,25 +340,17 @@ in
 
   # Power-off: Linux's PSCI SYSTEM_OFF call isn't implemented by the L4T
   # secure firmware ("Tegra System Off: operation not handled", EL3 panic);
-  # the board hangs until the bootloader-enabled PMIC watchdog reboots it
-  # (~80 s later, NVERC 0x02). The max77620 driver's own power-off handler
+  # the board then hangs powered on. Once, the PMIC watchdog rebooted it ~80 s
+  # later (NVERC 0x02); another time it stayed hung. The max77620 driver's
+  # own power-off handler
   # is never installed because PSCI already claims pm_power_off. So power
   # off the PMIC from a systemd-shutdown hook instead (same register write
   # the driver would do: ONOFFCNFG1 0x41, SFT_RST bit 7). Reboots unaffected.
-  systemd.shutdownRamfs.contents."/lib/systemd/system-shutdown/jetson-pmic-poweroff".source =
-    pkgs.writeShellScript "jetson-pmic-poweroff" ''
-      [ "$1" = poweroff ] || exit 0
-      export PATH=${lib.makeBinPath [ pkgs.i2c-tools pkgs.coreutils ]}
-      bus=""
-      for d in /sys/bus/i2c/devices/*-003c; do
-        [ "$(tr -d '\0' < "$d/of_node/compatible" 2>/dev/null)" = "maxim,max77620" ] && bus=''${d##*/} && bus=''${bus%%-*}
-      done
-      [ -n "$bus" ] || { echo "jetson-pmic-poweroff: PMIC not found" > /dev/kmsg; exit 0; }
-      v=$(i2cget -f -y "$bus" 0x3c 0x41) || exit 0
-      echo "jetson-pmic-poweroff: PMIC on i2c-$bus, ONOFFCNFG1=$v -> setting SFT_RST" > /dev/kmsg
-      sync
-      i2cset -f -y "$bus" 0x3c 0x41 $(( v | 0x80 ))
-    '';
+  # systemd-shutdown looks for hooks in /etc/systemd/system-shutdown (and its
+  # own store path), not /lib/...; the final stage runs from the shutdown
+  # ramfs, so the hook goes there. systemd.shutdown covers the no-ramfs case.
+  systemd.shutdownRamfs.contents."/etc/systemd/system-shutdown/jetson-pmic-poweroff".source = pmicPowerOff;
+  systemd.shutdown.jetson-pmic-poweroff = pmicPowerOff;
 
   # Reboot hang: if the XUSB (USB3) controller is runtime-suspended when the
   # kernel runs its shutdown pass, it gets resumed (firmware reload) and the
