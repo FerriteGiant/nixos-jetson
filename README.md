@@ -157,6 +157,15 @@ during shutdown sometimes stalls the restart. A udev rule keeps that
 controller out of runtime suspend. Since then, every reboot has been
 immediate.
 
+### Power-off
+
+On this firmware, the kernel's standard power-off request (PSCI
+`SYSTEM_OFF`) isn't implemented: the secure firmware panics and the board
+hangs, still powered. Sometimes the PMIC watchdog then reboots it, so
+`poweroff` turned into a delayed reboot. A small systemd-shutdown hook
+powers the board off through the PMIC instead, using the same register write
+NVIDIA's kernel uses. It only acts on `poweroff`; reboots are unaffected.
+
 ### Headless device tree
 
 The NVIDIA GPU driver and the display and camera drivers are blocked from
@@ -190,6 +199,11 @@ without the SSD**; every SSD mount is `nofail`.
   The journal is held in RAM until the SSD mounts, about 25 s into boot, or
   for the whole boot if the SSD is missing. Nothing is written to the SD
   card underneath.
+- **Tested without the SSD:** the Nano boots normally about 30 s slower,
+  while the SSD mounts time out and are skipped. The journal stays in RAM
+  for that boot, swap is zram only, and the hourly snapshot unit fails,
+  leaving the system `degraded` as a visible hint. Reconnect the SSD and
+  reboot to bring it all back.
 - **TRIM quirk:** some USB-SATA bridges advertise UNMAP but report thin
   provisioning as off, so Linux disables discard. If `lsblk -D` shows
   `DISC-MAX 0B` on a drive that supports TRIM, a udev rule forcing
@@ -438,6 +452,17 @@ Its first readings showed the micro-USB supply already below the Nano's
 supply kept it in spec. The reset-reason and voltage-monitor services were
 then built, and tested by temporarily raising thresholds and generating
 load.
+
+**Power-off.** Testing the no-SSD boot started with a `poweroff`, and the
+board came back by itself 80 s later with a watchdog reset reason. The serial
+log showed why: the firmware panics on the PSCI `SYSTEM_OFF` call. The
+mainline PMIC driver can power off, but never installs its handler because
+PSCI has already claimed the power-off hook. A systemd-shutdown hook doing
+the same PMIC write fixed it. The first attempt was silently ignored: it was
+installed in a hook directory this systemd doesn't read
+(`/etc/systemd/system-shutdown` is the one that counts, inside the shutdown
+RAM filesystem). The same event exposed a bug in the reset-reason service,
+which exited with an error for watchdog-only resets.
 
 **Other findings.**
 - Ethernet negotiated only 100 Mbit/s; the cable was faulty.
