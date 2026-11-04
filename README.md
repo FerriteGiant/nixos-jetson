@@ -12,7 +12,7 @@ Background and phased plan: [`jetson_nano_nixos_hermes_plan.md`](jetson_nano_nix
 | B — Mint builder | **Done.** qemu-user binfmt + `extra-platforms = aarch64-linux`; Nix daemon upgraded 2.13.1 → 2.34.9 (needed for nixpkgs 26.05). |
 | C — minimal image | **Done.** |
 | D — write & boot | **Done 2026-11-03.** Boots unattended to login + SSH; no failed units. |
-| E — qualify | **In progress.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Reboot hang fixed. Self-update via GitHub + Tailscale working. Open: Ethernet links at 100 Mbit (downshift; deferred), host1x DT cleanup, rollback + storage tests. |
+| E — qualify | **In progress.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Reboot hang fixed. Self-update via GitHub + Tailscale working. Ethernet fixed (bad cable; now 1 Gbit/s). Open: host1x DT cleanup, rollback + storage tests. |
 | F — Hermes | Not started. |
 
 ## Build
@@ -212,3 +212,14 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   Address family not supported by protocol` right after a reboot (name briefly
   resolving to an IPv6 address the laptop can't use). `ssh -4` or the Tailscale
   IP works.
+
+### 2026-11-03 — Ethernet
+
+- The 100 Mbit link (`Downshift occurred from negotiated speed 1Gbps to actual
+  speed 100Mbps, check cabling!`) was the cable: after replacing it, `Link is
+  Up - 1Gbps/Full`, no downshift, also after a reboot.
+- PHY driver is the Realtek one (`Generic FE-GE Realtek PHY`, the RTL8168h
+  internal PHY); NIC firmware `rtl8168h-2_0.0.2 02/26/15` loads (zstd-compressed
+  firmware is supported by the kernel). EEE not supported.
+- Throughput: 32.7 MB NAR from cache.nixos.org at up to 71.7 MB/s (~573
+  Mbit/s; WAN/CDN-limited). `ethtool -S` error/drop counters all zero.
