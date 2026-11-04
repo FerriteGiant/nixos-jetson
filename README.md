@@ -266,5 +266,25 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   - Check with `journalctl -b -u pmic-reset-reason` (or `-b -1` etc.).
 - NVERC bit names beyond the observed 0x02/0x10/0x40 are from the MAX77620
   register description, not observed here.
-- INA3221 power monitor (likely on `i2c@7000c400`, disabled upstream) not yet
-  tried.
+- **INA3221 power monitor** enabled (see next section).
+
+### 2026-11-04 — INA3221 power monitor
+
+- Not on `i2c@7000c400` (U-Boot bus 2 probe: empty; bus 3 = c500: only EEPROMs
+  0x50/0x57). It's at 0x40 on **`i2c@546c0000` (VI I2C, L4T bus 6)**, a
+  child of host1x. host1x is now enabled (unblacklisted) with all its
+  display/camera children disabled in the DT; `ti,ina3221` node with
+  `VDD_IN`/`VDD_GPU`/`VDD_CPU`, 5 mΩ shunts (as in L4T). hwmon `ina3221`
+  (`in1..3`, `curr1..3`); no deferred probes / pending sync_state.
+- 5 Hz sampling of VDD_IN (supply as connected on 2026-11-04):
+
+  | | V min / mean | I mean / max | P |
+  |---|---|---|---|
+  | idle | 4.664 / 4.714 V | 546 / 640 mA | ~2.6 W |
+  | stress-ng 4 CPU + 2 vm (256M) | **4.536** / 4.589 V | 1128 / 1360 mA | ~5.2 W |
+
+  ~0.13 V sag for ~0.6 A → ~0.2 Ω source + cable resistance. Already below
+  5 V −5 % (4.75 V) at idle. An SSD (~0.5–1 A more) would push it lower: use
+  a 5 V 4 A barrel supply (J48 jumper) before attaching one.
+- VDD_GPU 0 mA (GPU power-gated); VDD_CPU ≈ 100 mA idle. Shunt values are
+  L4T's; bus voltages don't depend on them, currents do.
