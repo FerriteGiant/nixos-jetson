@@ -1,340 +1,422 @@
-# unicomplex — NixOS on the original Jetson Nano
+# NixOS on the original Jetson Nano
 
-Headless NixOS 26.05 on a Jetson Nano developer kit (P3450, B01 carrier,
-4 GB), upstream kernel, no GPU stack. Future home of Hermes Agent.
-Background and phased plan: [`jetson_nano_nixos_hermes_plan.md`](jetson_nano_nixos_hermes_plan.md).
+A flake for running headless NixOS 26.05 on the original (Maxwell, 4 GB)
+Jetson Nano developer kit, with the **mainline** Linux kernel and no NVIDIA
+GPU stack. It boots from an SD card through NVIDIA's stock bootloader, which
+stays unmodified in the module's QSPI flash. Memory clock scaling, power
+monitoring and reset-reason logging all work; the GPU, display and camera
+are deliberately left off.
 
-## Status
+- [1. What works](#1-what-works)
+- [2. Installation](#2-installation)
+- [3. How it was worked out](#3-how-it-was-worked-out)
 
-| Phase (see plan) | State |
-| --- | --- |
-| A — preserve working system | Skipped by decision: Ubuntu card data is disposable; card will be reused. QSPI untouched. |
-| B — Mint builder | **Done.** qemu-user binfmt + `extra-platforms = aarch64-linux`; Nix daemon upgraded 2.13.1 → 2.34.9 (needed for nixpkgs 26.05). |
-| C — minimal image | **Done.** |
-| D — write & boot | **Done 2026-11-03.** Boots unattended to login + SSH; no failed units. |
-| E — qualify | **Done 2026-11-04.** EMC (DRAM clock) scaling fixed: 1600 MHz, ~11 GB/s. Reboot hang fixed. Self-update via GitHub + Tailscale working. Ethernet 1 Gbit/s (cable). Headless DT cleanup. Rollback via boot menu, storage stress + integrity OK. |
-| F — Hermes | Not started. |
+Detailed, dated engineering notes (raw measurements, addresses, logs) are
+in [`docs/bringup-log.md`](docs/bringup-log.md).
 
-## Build
+---
 
-```bash
-nix build .#packages.aarch64-linux.sdImage -o result-sdimage
-# -> result-sdimage/sd-image/nixos-unicomplex.img.zst  (~570 MiB, 2.45 GiB raw)
-```
+## 1. What works
 
-First build from scratch takes ~25 min on the laptop (mostly emulated
-mkfs/zstd of the image); packages come from cache.nixos.org.
-
-## Write the card
-
-Data on the current card is disposable. From the laptop, with the card in a
-reader (verify the device with `lsblk` first — this erases it):
-
-```bash
-zstdcat result-sdimage/sd-image/nixos-unicomplex.img.zst | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
-```
-
-The root partition grows to fill the card on first boot.
-
-## Access
+### At a glance
 
 | | |
 | --- | --- |
-| SSH | `ssh sirhc@192.168.17.179` (key only; DHCP on `eth0`, MAC `00:04:4b:ea:d9:87`). `unicomplex` doesn't resolve via the router yet. |
-| Serial | `tools/nano-serial.py` — UARTA/J50, 115200 8N1, `ttyS0`; login `sirhc` / temporary password `unicomplex` (change it) |
-| sudo | passwordless for wheel during bring-up |
-| Health | `voltage [-w]` (INA3221 rails V/mA/mW + this boot's supply-dip events), `bootreason [N]` (reset reason of the last N boots), `journalctl -u vdd-in-monitor -p warning` (supply dips) |
+| OS | NixOS 26.05, flake-based, nixpkgs pinned in `flake.lock` |
+| Kernel | Mainline 6.18 LTS (the nixpkgs default, from the binary cache, so nothing is compiled) |
+| Device tree | Upstream `tegra210-p3450-0000.dtb` plus three small overlays (memory clock tables, headless, power monitor) |
+| Bootloader | NVIDIA's stock CBoot + U-Boot in QSPI; untouched, nothing saved to its environment |
+| CPU | 4× Cortex-A57, frequency scaling 204 MHz – 1.55 GHz |
+| RAM | 4 GB LPDDR4 at **1600 MHz**, about 11 GB/s copy bandwidth |
+| Storage | Root filesystem on the SD card (ext4) |
+| Network | Gigabit Ethernet (DHCP); optional Tailscale |
+| Not used | GPU, display/HDMI, camera; disabled in the device tree |
 
-## Updating a running system
+It takes about a minute from power-on (or `reboot`) to SSH.
+Repeated reboots, memory and CPU stress, storage integrity tests and
+rollback to older generations have all been tested (section 3).
 
-Like the Linode, the Nano updates itself from a clone of this repo at
-`~/nixos-jetson` (GitHub, per-repo deploy key `~/.ssh/github_deploy` with
-write access, so it can also commit and push):
+### Layout of this repo
+
+```
+flake.nix                           nixosConfigurations.<host> + packages.aarch64-linux.sdImage
+common-configuration.nix            user, SSH, Tailscale, sudo, nix settings, packages
+hosts/<host>/configuration.nix      hostname and host-specific hardware quirks
+modules/jetson-nano.nix             everything board-specific (boot, DT overlays, services)
+modules/board-commands.nix          `voltage` and `bootreason`
+modules/vdd-in-monitor.sh           supply-dip monitor
+hw/l4t-emc-table-ramcode0.dtsi      NVIDIA's memory timing tables (source data)
+tools/                              serial console, reboot and benchmark helpers
+```
+
+### Boot chain
+
+The stock bootloader expects NVIDIA's own kernel. Three things about it
+needed working around, all of them from a U-Boot script, so the flash and the
+saved U-Boot environment stay untouched:
+
+1. **The initrd load address.** U-Boot loads the initrd only 14 MiB below the
+   kernel and never relocates it. NixOS's systemd initrd is about 25 MB, so
+   the kernel would overwrite its end. The script moves it to `0xa0000000`.
+2. **The memory-controller node.** U-Boot copies some nodes from NVIDIA's
+   device tree into the one it boots with. One of them replaces the mainline
+   memory-controller node with NVIDIA's version, which the mainline driver
+   can't use. The script removes that node from the copy list.
+3. **The memory timing tables.** The script loads them into reserved RAM so
+   the mainline driver can find them (see below).
+
+How the script gets run: the SD card has a small FAT partition (1) and the
+ext4 root (2). Only the FAT partition is marked bootable, so U-Boot's normal
+boot search finds no `extlinux.conf` there and runs its `/boot.scr` instead.
+The script makes the changes above in RAM, then hands over to the
+NixOS-managed `/boot/extlinux/extlinux.conf` on partition 2.
+
+```
+QSPI: CBoot → U-Boot ─▶ SD p1 (FAT): /boot.scr
+                          │  ramdisk address, EMC node, EMC tables (RAM only)
+                          ▼
+                        SD p2 (ext4): /boot/extlinux/extlinux.conf
+                          │  NixOS generation menu (5 s), kernel + DTB + initrd
+                          ▼
+                        systemd initrd → root by label → NixOS
+```
+
+`nixos-rebuild` keeps everything in sync: its bootloader step writes
+`extlinux.conf` as usual, then refreshes `boot.scr` and the timing tables on
+the FAT partition.
+
+### Memory clock (EMC)
+
+Out of the box the RAM ran at the 204 MHz clock the bootloader leaves it at,
+which gave about 2.2 GB/s. Mainline Linux has the right driver
+(`tegra210-emc`), but it expects the bootloader to supply the memory timing
+tables in a binary format in reserved memory. NVIDIA's bootloader instead
+passes them as device-tree nodes in its own older format, and in the process
+breaks the mainline node.
+
+The fix:
+
+- The timing tables for the 4 GB developer kit's RAM type (RAM code 0: 204
+  and 1600 MHz, normal and high-temperature variants) were extracted from
+  what NVIDIA's bootloader passes in.
+- `tools/l4t-emc-to-bin.py` converts them to the mainline binary layout at
+  build time, and they're loaded into two reserved-memory regions declared by
+  a device-tree overlay.
+- The driver now probes and offers both rates. Mainline has no automatic
+  memory frequency governor for this chip, so `emc-max-rate.service` pins
+  1600 MHz at boot. The driver still adjusts refresh for temperature on its
+  own.
+
+Result: about **11 GB/s** copy bandwidth, a **5× improvement**. Validated with
+memtester under concurrent CPU load and repeated 204↔1600 MHz switching.
+
+### Power monitoring
+
+The module has a 3-channel power monitor (INA3221) on the 5 V input, CPU and
+GPU rails. Upstream doesn't describe it, so an overlay adds it on the bus
+where it lives. That bus belongs to the camera/display block, which is
+otherwise disabled. Readings appear as a standard hwmon device.
+
+- **`voltage`** prints each rail's voltage, current and power, followed by
+  any supply dips logged this boot. `voltage -w` refreshes every second.
+- **`vdd-in-monitor.service`** samples the 5 V input five times a second and
+  averages over one second.
+  - It logs a **warning** when the average drops below 4.70 V. It clears
+    only above 4.75 V, so a supply hovering at the threshold doesn't flood
+    the log.
+  - While the input stays low it reminds at most once a minute; it logs a
+    notice on recovery with the duration and lowest value.
+  - It logs an hourly summary at info level.
+  - Thresholds are set in `modules/jetson-nano.nix`.
+
+On a decent 5 V barrel-jack supply the input stays comfortably above the
+warning threshold even under full load; micro-USB supplies tend not to.
+
+### Boot reason logging
+
+The power-management chip (PMIC) records why the board last reset or lost
+power. NVIDIA's first-stage bootloader reads that register (which clears it)
+and passes the value along in the device tree. `pmic-reset-reason.service`
+decodes it on every boot, together with the SoC's own reset status.
+
+- **`bootreason [N]`** lists the reason for the last N boots (default 5).
+
+| What you see | Meaning |
+| --- | --- |
+| `NVERC=0x00 … software-reboot … (clean)` | Normal reboot |
+| `-> WTCHDG(watchdog)` | The hardware watchdog had to reset the board |
+| `-> MBU(input-undervoltage)` and/or `MBLSD(low-input-shutdown)` | Input power collapsed: either unplugged, or a **brownout** |
+
+Anything other than a clean result is logged as a warning. An undervoltage on
+a boot where nobody pulled the plug means the supply browned out.
+
+### Reboot reliability
+
+Without intervention, about half of all reboots hung for roughly two minutes
+until the PMIC's watchdog reset the board. The cause was the USB 3
+controller: if it is runtime-suspended when the kernel shuts down, waking it
+during shutdown sometimes stalls the restart. A udev rule keeps that
+controller out of runtime suspend. Since then, every reboot has been
+immediate.
+
+### Headless device tree
+
+The NVIDIA GPU driver and the display and camera drivers are blocked from
+loading. The display and camera nodes are also disabled in the device tree.
+Only the bus that hosts the power monitor stays enabled. Disabling the nodes
+rather than just blocking the drivers lets the kernel finish its power-domain
+cleanup instead of waiting forever for devices that will never probe.
+
+### Access and updates
+
+- **SSH:** key-only login for the user defined in `common-configuration.nix`;
+  password authentication and root login are disabled.
+- **Tailscale (optional):** enabled with Tailscale SSH. It connects
+  automatically once an auth key is placed in `/etc/tailscale-authkey`.
+- **Serial console:** 115200 8N1 on the carrier's debug UART header, via a
+  3.3 V UART-to-USB adapter. The console also gets a login prompt, and
+  `tools/nano-serial.py` can log it or drive the U-Boot prompt.
+- **sudo:** passwordless for the wheel group, a bring-up convenience. A
+  `NOPASSWD` rule for `nixos-rebuild` alone is also included, so tightening
+  is a one-line change.
+
+**Self-updating:** the Nano can rebuild itself from a clone of this repo. The
+config expects the clone at `~/nixos-jetson` and a GitHub deploy key at
+`~/.ssh/github_deploy`. A deploy key is limited to a single repo; give it
+write access if the Nano should also commit and push.
 
 ```bash
 cd ~/nixos-jetson && git pull
-rsf     # alias: sudo nixos-rebuild switch --flake ~/nixos-jetson
+rsf        # alias for: sudo nixos-rebuild switch --flake ~/nixos-jetson
 ```
 
-From the laptop (faster eval; pushes the closure):
+A rebuild on the Nano takes about a minute, since packages come from the
+binary cache, and gives the same result as building on another machine. Old
+generations stay in the boot menu for rollback.
 
-```bash
-T=$(nix build --no-link --print-out-paths .#nixosConfigurations.unicomplex.config.system.build.toplevel)
-nix copy --no-check-sigs --to ssh-ng://sirhc@<nano> $T   # ssh-ng proxy doesn't pass trust
-ssh sirhc@<nano> "sudo nix-env -p /nix/var/nix/profiles/system --set $T && sudo $T/bin/switch-to-configuration switch"
-```
+### Health commands
 
-The bootloader install step (`system.build.installBootLoader`) runs the
-stock extlinux builder and then syncs `boot.scr` and the EMC tables onto the
-FAT partition. The partition-1 bootable flag only comes from the image
-build.
+| Command | Shows |
+| --- | --- |
+| `voltage [-w]` | Power rails now, plus this boot's supply dips |
+| `bootreason [N]` | Why each of the last N boots happened |
+| `journalctl -u vdd-in-monitor -p warning` | Supply dips, any boot |
+| `sudo cat /sys/kernel/debug/clk/emc/clk_rate` | Memory clock (expect 1600000000) |
+| `sensors` | Temperatures and raw hwmon values |
 
-## Boot chain
+### Known quirks
 
-QSPI (CBoot → U-Boot 2020.04, default env) → distro_bootcmd scans `mmc 1`
-bootable partitions → p1 (FAT) has no extlinux.conf, runs `/boot.scr`, which
-(RAM only, no `saveenv`):
+- A few harmless kernel messages appear at err level on each boot:
+  clock-debug name warnings and one PMIC device-link warning.
+- There's no RTC battery, so the clock is wrong until NTP syncs, shortly
+  after the network comes up.
+- The memory timing tables are for RAM code 0 (the 4 GB developer kit). See
+  the caveat in section 2.
 
-1. `setenv ramdisk_addr_r 0xa0000000` (initrd clear of the kernel)
-2. drops `/external-memory-controller@7001b000` from `fdt_copy_node_paths`
-   (stops U-Boot replacing the upstream EMC node with L4T's)
-3. zeroes and loads `emc-nominal.bin`/`emc-derated.bin` to
-   `0x83400000`/`0x83408000`
-4. `sysboot mmc 1:2 … /boot/extlinux/extlinux.conf`
+---
 
-→ NixOS generation menu → kernel + upstream `tegra210-p3450-0000.dtb` (+
-overlay: EMC reserved-memory regions) → systemd initrd → root `NIXOS_SD` →
-`emc-max-rate.service` pins DRAM at 1600 MHz.
+## 2. Installation
 
-### Recovery
+These steps take a Nano from whatever it's running (typically NVIDIA's
+Ubuntu image) to the system described above. The SD card gets erased.
 
-If `boot.scr` is broken, interrupt U-Boot over serial and run:
+### Prerequisites
 
-```
-setenv ramdisk_addr_r 0xa0000000
-sysboot mmc 1:2 any 0x90100000 /boot/extlinux/extlinux.conf
-```
+- **Board:** an original Jetson Nano developer kit (4 GB, B01 carrier).
+  The module's QSPI flash must hold the boot firmware from **L4T 32.5 or
+  newer** (JetPack 4.5+); only 32.5.1 has actually been tested. Check from
+  NVIDIA's Ubuntu with `cat /etc/nv_tegra_release`. If it's older, update the
+  QSPI firmware with NVIDIA's JetPack 4.5+ tools first (SDK Manager or
+  `flash.sh`).
+- **Power:** a 5 V / 4 A barrel-jack supply with the J48 jumper fitted.
+  Micro-USB supplies sag below spec under load.
+- **SD card:** 32 GB or larger; a USB card reader for the build machine.
+- **UART-to-USB adapter (3.3 V)** on the debug UART header. It's optional
+  once everything works, but it's the only way to see what goes wrong before
+  the network is up.
+- **Build machine:** x86_64 Linux with Nix **2.18 or newer** (nixpkgs 26.05
+  requires it; a modern daemon is needed for builds), flakes enabled, and
+  qemu user-mode emulation for aarch64:
 
-Older NixOS generations are in the extlinux menu (5 s timeout).
+  ```bash
+  sudo apt install qemu-user-static           # or your distro's equivalent
+  echo 'extra-platforms = aarch64-linux' | sudo tee -a /etc/nix/nix.conf
+  sudo systemctl restart nix-daemon
+  ```
 
-## Bring-up log
+  Almost everything comes prebuilt from cache.nixos.org; only small glue
+  steps run under emulation.
 
-### 2026-11-03 — builder, flake, image
+### Steps
 
-- Laptop: Mint 21.3 x86_64. Nix 2.13.1 could not evaluate nixpkgs 26.05
-  (needs ≥ 2.18) and its daemon broke structured-attrs builds
-  (`source-stdenv.sh: /setup: No such file or directory`). Upgraded to 2.34.9.
-- Jetson (Ubuntu): `/proc/mtd` → `mtd0` 4 MiB `spi32766.0` (QSPI).
-  NIC: RTL8111/8168 rev 15 on Tegra PCIe.
-- U-Boot (`printenv`/`bdinfo`, captured over serial):
-  - DRAM banks `0x80000000+0x7ee00000`, `0x100000000+0x7f200000`;
-    U-Boot relocated at `0xfed2f000`, fdt/stack around `0xfc5fa000`.
-  - `kernel_addr_r=0x84000000 ramdisk_addr_r=0x83200000 fdt_addr_r=0x83000000
-    scriptaddr=0x90000000 pxefile_addr_r=0x90100000`,
-    `initrd_high=fdt_high=ffffffffffffffff` (no relocation),
-    `xusb_fw_addr=92ca828c`, `bootdelay=2`.
-  - `mmc list`: SD slot is **mmc 1** (`sdhci@700b0000`), mmc 0 is empty.
-  - The env defines `preboot` (sources `/u-boot-preboot.scr` from `mmc 1:1`)
-    but this build **never runs it** (no `CONFIG_USE_PREBOOT`, evidently).
-- Kernel 6.18.60 (nixpkgs default): `Image` 64.5 MB, header `image_size`
-  62.7 MiB → occupies `0x84000000–0x87eb0000`.
-  sdhci-tegra, max77620 (mfd/regulator/pinctrl/gpio), i2c-tegra, pci-tegra,
-  phy-tegra-xusb, serial 8250/tegra, ext4 are built in; `mmc_block`, `r8169`,
-  `xhci-tegra`, `tegra-soctherm`, `tegra210-emc` are modules.
-- initrd: 26.05's default **systemd stage 1 is 25.3 MB** (86 MB unpacked:
-  systemd, openssl, tpm2-tss…) even with only `mmc_block` + defaults, far
-  over the 14 MiB gap. Scripted stage 1 is deprecated (removal in 26.11), so
-  the initrd is moved to `0xa0000000` instead (see Boot chain).
-- `sd-image.nix` enables `hardware.enableAllHardware`; forced off.
-- linux-firmware `nvidia/tegra210/nvjpg.bin` is a symlink into `tegra186/`;
-  copy with `cp -rL`.
-- System closure 1.6 GiB.
-- Verified image: p1 FAT `FIRMWARE` 30 MiB with `u-boot-preboot.scr`
-  (legacy script image), p2 ext4 `NIXOS_SD` flagged bootable;
-  `/boot/extlinux/extlinux.conf` has LINUX/INITRD/FDT (`tegra210-p3450-0000.dtb`)
-  and `init=` for the system closure; 5 s menu timeout.
+1. **Adapt the config.**
+   - In `common-configuration.nix`, set your user name, SSH public key and
+     git identity, and change the temporary serial-console password. Remove
+     the Tailscale lines if you don't use it.
+   - Rename `hosts/<host>/` and the matching `nixosConfigurations.<host>`
+     entry in `flake.nix` to your hostname.
+   - The host config carries a TRIM quirk for one specific USB-SATA bridge;
+     drop it if you don't have that enclosure.
+2. **Build the image** (about 25 minutes the first time):
 
-### 2026-11-03 — first boots
+   ```bash
+   nix build .#packages.aarch64-linux.sdImage -o result-sdimage
+   ```
 
-- Wrote the card from the laptop (`wipefs -a` first to drop the old GPT
-  backup header, then `dd`).
-- **Boot 1:** U-Boot 2020.04 loaded extlinux → kernel + DTB fine, but
-  `Initramfs unpacking failed: ZSTD-compressed data is corrupt` → oops in
-  `free_initrd_mem`, hang. No `preboot` output: the hook isn't executed.
-  U-Boot also reports `Loading Environment from SPI Flash... bad CRC, using
-  default environment` — env has never been saved.
-- **Boot 2:** interrupted U-Boot over serial, `setenv ramdisk_addr_r
-  0xa0000000`, `boot` → full boot to `unicomplex login:` in ~40 s; SSH OK.
-- Switched to the `boot.scr` method (only p1 bootable); applied in place on
-  the running system (copied `boot.scr` to p1, `sfdisk --activate
-  /dev/mmcblk1 1`, removed `u-boot-preboot.scr`).
-- **Boot 3:** unattended reboot: `Found U-Boot script /boot.scr` → NixOS. ✅
-- Health: `systemctl is-system-running` = running, no failed units; NTP
-  synced (no RTC battery: clock is wrong until NTP); root grown to 58 GB;
-  3.5 GB RAM free; thermal zones cpu/gpu/pllx/mem readable (~25 °C idle).
-- Linux names the SD card `mmcblk1` (U-Boot: `mmc 1`).
-- Known warnings: `tegra210-emc` probe fails (-2, no DRAM frequency
-  scaling); `tegra-vi` missing `ports` (camera, irrelevant); thermal
-  cooling-map phandle warnings; `max77620` device-link warning; `tegra_drm`
-  and `host1x` load (display; harmless, could be blacklisted).
-- Ethernet: RTL8168h on generic PHY driver; link
-  `Downshift occurred from negotiated speed 1Gbps to actual speed 100Mbps,
-  check cabling!` — check cable/switch port, then the Realtek PHY driver.
+3. **Write the card.** Check the device name with `lsblk` first:
 
-### 2026-11-03 — EMC (DRAM clock) scaling
+   ```bash
+   sudo wipefs -a /dev/sdX
+   zstdcat result-sdimage/sd-image/*.img.zst | sudo dd of=/dev/sdX bs=4M conv=fsync status=progress
+   ```
 
-- Symptom: `emc` clock stuck at 204 MHz; `tegra210-emc` probe -2;
-  `could not find phandle 480/286`. DRAM bandwidth (tools/membw.c, 4
-  threads, 64 MiB arrays): copy 2245 / scale 2213 / triad 1909 MB/s.
-- Cause: vendor U-Boot env
-  `fdt_copy_node_paths=…:/external-memory-controller@7001b000:/memory@80000000`
-  copies CBoot's L4T EMC node over the upstream one: L4T clocks list (phandles
-  from the L4T tree), L4T-format `emc-table@<ramcode>/emc-table@<khz>`
-  children, and phandle 0x21, which collides with `/i2c@7000c700`. The upstream
-  DT also lacks the `nvidia,tegra210-emc-table` reserved memory that
-  mainline expects the bootloader to fill.
-- Board RAM code 0 (`tegra-mc: … RAM code 0`). L4T has tables for RAM
-  codes 0 and 2; each has nominal + derated entries at 204000 and 1600000 kHz,
-  revision 0x7 (= mainline's r21021 sequence).
-- Fix: see Boot chain. Converter maps L4T props 1:1 onto
-  `struct tegra210_emc_timing` (4928 B; checked against the v6.18 header).
-- Result: driver probes (`available_rates 204000000 1600000000`); 50
-  transitions 204↔1600 clean; copy 11256 / scale 10986 / triad 9266 MB/s
-  (5×). memtester 2G (1 loop, all 16 tests ok) concurrently with 3-core
-  stress-ng at 1600 MHz, ~18 min: no errors; peak ~60 °C.
-- Mainline has no Tegra210 EMC devfreq governor, so `emc-max-rate.service`
-  pins 1600 MHz (the driver still handles temperature derating/refresh).
-- CPU: `cpufreq-dt`/schedutil, 204–1555.5 MHz. Under 3-core load 1.555 GHz
-  at ~40 °C (cpu-thermal).
-- One `systemctl reboot` stalled ~2 min after `shutdown[1]: Rebooting.` before
-  TegraBoot started; see next section.
+   `wipefs` matters if the card previously had a GPT partition table: its
+   backup copy at the end of the card would otherwise linger.
+4. **Boot.** Put the card in the Nano, attach serial if you have it, and
+   power on. You should see the boot script's banner, the NixOS menu, kernel
+   messages, then a login prompt within about a minute. The root partition
+   grows to fill the card on first boot.
+5. **Log in** with `ssh <user>@<host>`; find the IP from your router or
+   the serial console.
+6. **Post-install:**
+   - Tailscale: put an auth key in `/etc/tailscale-authkey` (mode 600) and
+     run `sudo systemctl restart tailscaled-autoconnect`.
+   - Self-updates: push your adapted config to your own GitHub repo, generate
+     a key on the Nano (`ssh-keygen -t ed25519 -f ~/.ssh/github_deploy`), add
+     it to that repo as a deploy key, and clone the repo to `~/nixos-jetson`.
+   - Change the password with `passwd`.
+7. **Check:** `bootreason`, `voltage`, `systemctl --failed`, and the memory
+   clock should read 1600000000 (see Health commands).
 
-### 2026-11-03 — Tailscale, self-update, reboot hang
+### Caveats
 
-- Tailscale up via `/etc/tailscale-authkey` (100.86.57.92, `--ssh`).
-- GitHub `FerriteGiant/nixos-jetson` (private) with a per-repo deploy key
-  (write) generated on the Nano. `git pull && rsf` on the Nano: 71 s,
-  same store path as the laptop build. `git push --dry-run` from the Nano OK.
-- **Reboot hang:** timestamped serial (`host time` per line) showed a
-  128.2 s gap between the last kernel line and TegraBoot in slow cycles, i.e.
-  the max77620 watchdog (max timeout ~128 s, armed by systemd-shutdown)
-  rescuing a hung restart. In slow cycles the last line is
-  `tegra-xusb 70090000.usb: Firmware timestamp…` (controller being resumed
-  from runtime suspend during device shutdown); fast ones continue
-  `r8169 … Link is Down` / `kvm: exiting…` / `reboot: Restarting system`.
-  Before: 4/7 reboots slow (~190 s to SSH vs ~65 s). With
-  `70090000.usb/power/control=on` (udev rule): 10/10 immediate.
-- `reboot-cycle.sh`, 6 cycles: ~64 s reboot→SSH, `running`, no failed units,
-  EMC 1600 MHz, same 5 known err-level messages each boot.
-- Side effect of blacklisting host1x: `i2c@7000c700` (HDMI DDC) waits forever
-  for the dpaux pinmux, and `tegra-pmc`/`tegra-mc` `sync_state()` stays
-  pending. Harmless; cleaner to disable those nodes in the DT (todo).
-- From the laptop, `ssh sirhc@unicomplex` occasionally fails with `socket:
-  Address family not supported by protocol` right after a reboot (name briefly
-  resolving to an IPv6 address the laptop can't use). `ssh -4` or the Tailscale
-  IP works.
+- **RAM code.** The memory timing tables in `hw/` are for RAM code 0, which
+  is what the 4 GB developer kit reports (`dmesg | grep "RAM code"`). A
+  board with a different RAM code needs its own tables. Extract them from
+  `/proc/device-tree/external-memory-controller@7001b000/` *before* adding
+  this repo's boot script, since the script stops U-Boot from copying them,
+  then point the converter at them. Booting with the wrong tables is safe
+  at 204 MHz, but switching to 1600 MHz could corrupt memory, so check
+  before relying on it.
+- **U-Boot environment.** The boot script assumes the stock default
+  environment, in particular the default node list in
+  `fdt_copy_node_paths`. If someone has saved a custom environment on your
+  board, compare it with `modules/jetson-nano.nix`.
+- **Recovery.** If the boot script ever breaks, interrupt U-Boot over serial
+  and boot by hand:
 
-### 2026-11-03 — Ethernet
+  ```
+  setenv ramdisk_addr_r 0xa0000000
+  sysboot mmc 1:2 any 0x90100000 /boot/extlinux/extlinux.conf
+  ```
 
-- The 100 Mbit link (`Downshift occurred from negotiated speed 1Gbps to actual
-  speed 100Mbps, check cabling!`) was the cable: after replacing it, `Link is
-  Up - 1Gbps/Full`, no downshift, also after a reboot.
-- PHY driver is the Realtek one (`Generic FE-GE Realtek PHY`, the RTL8168h
-  internal PHY); NIC firmware `rtl8168h-2_0.0.2 02/26/15` loads (zstd-compressed
-  firmware is supported by the kernel). EEE not supported.
-- Throughput: 32.7 MB NAR from cache.nixos.org at up to 71.7 MB/s (~573
-  Mbit/s; WAN/CDN-limited). `ethtool -S` error/drop counters all zero.
+  Older generations are always available in the boot menu
+  (`tools/boot-menu-pick.py` selects one over serial).
 
-### 2026-11-04 — headless DT cleanup, rollback, storage
+---
 
-- DT overlay disables `/host1x@50000000`, `/i2c@7000c700`, `/mipi@700e3000`:
-  no more deferred probes or pending `sync_state()`. Remaining err-level
-  messages each boot (cosmetic): 4× `tegra-clk-debug: … connection ID is
-  greater than 16`, 1× `max77620 … Failed to create device link`.
-- Rollback: `tools/boot-menu-pick.py 4` selected generation 4 in the extlinux
-  menu over serial; `/run/booted-system` = gen 4 (own DTB, no udev fix:
-  `power/control=auto`). Plain reboot returned to the default (gen 6).
-- SD card (`USD00`, 58.2 GiB, 02/2020) at UHS-I SDR104. fio direct I/O: seq
-  write 38.5 MB/s, seq read 83.6 MB/s, 4K rand read 1714 IOPS (QD32), 4K rand
-  write 341 IOPS. 2 GiB urandom write → drop caches → sha256 read-back match.
-  No mmc/ext4/I/O errors. Random-write IOPS are the weak spot; consider a USB
-  SSD for Hermes state (plan, phase E/F).
+## 3. How it was worked out
 
-### 2026-11-04 — brownout / reset-reason detection
+Every change was tested on the hardware, one at a time, with the serial
+console captured from power-on. The detailed notes are in
+[`docs/bringup-log.md`](docs/bringup-log.md).
 
-- TegraBoot prints the MAX77620 **NVERC** (non-volatile event recorder) every
-  boot: `pmic max77620 NVERC : 0x..`. Observed values matched events:
-  `0x00` every clean software reboot; `0x02` (WTCHDG) both 128 s watchdog
-  reboots; `0x40` (MBU, input undervoltage) and `0x50` (MBU + MBLSD,
-  low-input shutdown) after pulling the power plug. **A brownout shows as
-  0x40/0x10 on a boot where nobody pulled the plug**; it can't be told apart
-  from a deliberate unplug.
-- Linux reads NVERC (`i2cget -f -y 1 0x3c 0x0c`) as `0x00` even right after
-  a plug cycle → TegraBoot clears it before Linux. The Tegra PMC sysfs
-  `reset_reason` does distinguish `POWER_ON_RESET` (plug cycle) from
-  `SW_MAIN` (software reboot), but can't say *why* power went away; NVERC can.
-- U-Boot `i2c dev 0; i2c md 0x3c 0x0c 1` also reads 0x00 (cleared). But
-  CBoot's DT (`fdt addr ${fdt_copy_src_addr}; fdt print /chosen`) has
-  `reset { pmic_reset_status = <0x40>; pmc_reset_status = <0x0>; }`, and
-  `/chosen/reset` is in `fdt_copy_node_paths`, so Linux sees it at
-  `/proc/device-tree/chosen/reset/`. **`pmic-reset-reason.service`** decodes
-  and logs it each boot (warning level for watchdog/thermal/undervoltage):
-  - plug cycle: `PMIC NVERC=0x40 -> MBU(input-undervoltage); Tegra PMC reset:
-    power-on (0x00000000)` + `input power dropped: brownout, unless the board
-    was unplugged`
-  - `systemctl reboot`: `PMIC NVERC=0x00; Tegra PMC reset: software-reboot
-    (0x00000003) (clean)`
-  - Check with `journalctl -b -u pmic-reset-reason` (or `-b -1` etc.).
-- NVERC bit names beyond the observed 0x02/0x10/0x40 are from the MAX77620
-  register description, not observed here.
-- **INA3221 power monitor** enabled (see next section).
+**Starting point.** The existing NVIDIA image showed which bootloader was in
+QSPI (L4T 32.5.1: CBoot + U-Boot 2020.04). U-Boot's environment and memory
+map were captured over serial (`printenv`, `bdinfo`): load addresses, the
+`fdt_copy_node_paths` list, and that the SD slot is `mmc 1`. That map shaped
+every later decision. The nixpkgs default kernel turned out to have all the
+Tegra drivers needed for booting built in, so the initrd only needed the MMC
+block driver, and the kernel could come straight from the binary cache.
 
-### 2026-11-04 — INA3221 power monitor
+**Build host.** An older Nix (2.13) couldn't evaluate nixpkgs 26.05, and
+its daemon failed builds that use structured attributes, with an error
+pointing at a missing `$stdenv`. Upgrading Nix fixed both. Emulated aarch64
+builds worked once qemu binfmt was registered.
 
-- Not on `i2c@7000c400` (U-Boot bus 2 probe: empty; bus 3 = c500: only EEPROMs
-  0x50/0x57). It's at 0x40 on **`i2c@546c0000` (VI I2C, L4T bus 6)**, a
-  child of host1x. host1x is now enabled (unblacklisted) with all its
-  display/camera children disabled in the DT; `ti,ina3221` node with
-  `VDD_IN`/`VDD_GPU`/`VDD_CPU`, 5 mΩ shunts (as in L4T). hwmon `ina3221`
-  (`in1..3`, `curr1..3`); no deferred probes / pending sync_state.
-- 5 Hz sampling of VDD_IN (supply as connected on 2026-11-04):
+**The initrd overlap.** U-Boot leaves 14 MiB below the kernel and doesn't
+relocate the initrd. Trimming modules didn't help: the systemd initrd in
+26.05 is about 25 MB on its own, and the older script-based initrd is being
+removed in 26.11. The first boot failed exactly as predicted:
+`Initramfs unpacking failed: ZSTD-compressed data is corrupt`.
+- U-Boot's environment had a `preboot` hook that looked like the obvious
+  fix, but this build never runs it.
+- Setting `ramdisk_addr_r` by hand at the U-Boot prompt proved the rest of
+  the system booted fine.
+- The permanent fix uses U-Boot's normal boot-script search: mark the FAT
+  partition bootable, put `boot.scr` there, and have it chain to
+  `extlinux.conf`. It was applied to the running card in place, then built
+  into the image.
 
-  | | V min / mean | I mean / max | P |
-  |---|---|---|---|
-  | idle | 4.664 / 4.714 V | 546 / 640 mA | ~2.6 W |
-  | stress-ng 4 CPU + 2 vm (256M) | **4.536** / 4.589 V | 1128 / 1360 mA | ~5.2 W |
+**Memory clock.** The memory clock read 204 MHz and `tegra210-emc` failed
+to probe. Several warnings pointed the same way: the kernel couldn't find
+referenced device-tree nodes, and the thermal zones' references were broken.
+- Dumping the live device tree showed the memory-controller node wasn't the
+  upstream one. U-Boot had replaced it, via `fdt_copy_node_paths`, with
+  NVIDIA's version: different clocks, NVIDIA-format timing tables, and a node
+  handle that collided with an I2C bus.
+- Mainline instead wants a binary table array in reserved memory.
+- NVIDIA's per-property format maps one-to-one onto the mainline struct.
+  The converter checks every field against the kernel header's layout, and
+  gcc agreed on the struct size.
+- The table revision matched the only clock-change sequence mainline
+  supports.
+- Rollout went in stages: confirm the driver probes at 204 MHz, switch by
+  hand while watching serial, toggle 50 times, run memtester under CPU load,
+  and only then pin 1600 MHz at boot.
 
-  ~0.13 V sag for ~0.6 A → ~0.2 Ω source + cable resistance. Already below
-  5 V −5 % (4.75 V) at idle. An SSD (~0.5–1 A more) would push it lower.
-- **Switched to the 5 V barrel jack (J48)**, same test:
+**Reboot hang.** Some reboots took about 3 minutes instead of 1.
+- A serial capture with a host-side timestamp on every line showed a
+  128 s gap between the kernel's last message and the bootloader. 128 s is
+  the PMIC watchdog's maximum timeout, so the restart itself was hanging.
+- In every slow case, the last message was the USB 3 controller reloading
+  its firmware. It was being woken from runtime suspend during shutdown.
+- Keeping it out of runtime suspend: 10 of 10 reboots clean, against about
+  half hanging before.
 
-  | | V min / mean | I mean / max | P |
-  |---|---|---|---|
-  | idle | 5.088 / 5.096 V | 492 / 760 mA | ~2.5 W |
-  | stress-ng 4 CPU + 2 vm (256M) | **4.968** / 5.009 V | 1042 / 1256 mA | ~5.2 W |
+**Headless cleanup.** Blocking the display drivers left the kernel waiting
+on devices that would never probe. That kept power-domain cleanup pending
+and an I2C bus deferred. Disabling those nodes in the device tree fixed it.
 
-  In spec under load with ~0.2 V margin; ~0.09 V sag per ~0.55 A. The swap
-  itself was logged by pmic-reset-reason as `NVERC=0x40 -> MBU`, as expected.
-- VDD_GPU 0 mA (GPU power-gated); VDD_CPU ≈ 100 mA idle. Shunt values are
-  L4T's; bus voltages don't depend on them, currents do.
-- **`vdd-in-monitor.service`** (`modules/vdd-in-monitor.sh`): samples VDD_IN
-  at 5 Hz, 1 s moving average (5 samples); warning when the average drops
-  below **4700 mV**, clears above 4750 mV (hysteresis), reminder at most
-  once a minute while low (with the lowest average), notice on recovery
-  (duration + lowest), info summary hourly. ~0.7 % of one core. Thresholds
-  are env vars in `modules/jetson-nano.nix`. Test with raised thresholds
-  (5050/5080) + stress burst produced exactly: warn → reminders → recovered →
-  summary. Check: `journalctl -u vdd-in-monitor -p warning`.
+**Boot reason.** The bootloader prints the PMIC's event register on every
+boot. Correlating its values with known events made it readable: 0 for a
+normal reboot, the watchdog bit for the hung reboots, undervoltage bits for
+pulled plugs. Linux and U-Boot both read 0, because the first-stage
+bootloader clears the register on read. But that bootloader's own device
+tree (inspected from U-Boot) holds a copy under `/chosen/reset`, and U-Boot
+already copies that node into the kernel's device tree. So Linux could read
+it all along.
 
-### 2026-11-04 — USB SSD validation
+**Power monitor.** The first guess, one of the general I2C buses, was empty
+when probed from U-Boot. NVIDIA's tools read the monitor from the camera
+block's I2C controller, which sits under the display/camera bus. Re-enabling
+just that bus, with everything else on it disabled, made the monitor appear.
+Its first readings showed the micro-USB supply already below the Nano's
+5 V −5 % input spec at idle and sagging further under load. A barrel-jack
+supply kept it in spec. The reset-reason and voltage-monitor services were
+then built, and tested by temporarily raising thresholds and generating
+load.
 
-- **Hardware:** WD PC SA530 256 GB M.2 **SATA** SSD (`SDATB8Y256G1001`, fw
-  40102101) in a VIA Labs **VL716** (`2109:0716`) enclosure; `uas` driver at
-  5 Gbit/s through the carrier's internal USB 3 hub. Pre-existing empty btrfs
-  `WD256` (made by Chris 2026-11-04).
-- **Health (smartctl -d sat):** PASSED; 0 reallocated / uncorrectable / CRC
-  errors, error log empty, wear indicator 98, 28 359 power-on h (used drive),
-  34–38 °C. `smartctl -d snt*` probes send ATA PASS-THROUGH(12) (0xa1),
-  which the bridge ignores → 60 s timeout + `uas_eh_device_reset` (seen twice,
-  both from those probes; none during real I/O). Use `-d sat`.
-- **Throughput** (fio, file on btrfs, direct I/O unless noted):
+**Other findings.**
+- Ethernet negotiated only 100 Mbit/s; the cable was faulty.
+- Rollback was tested by picking an old generation from the boot menu over
+  serial.
+- The SD card passed fio and a write/read-back checksum test. Its
+  random-write performance is the main bottleneck for write-heavy workloads,
+  so a USB SSD is worth adding for application data.
 
-  | | SSD | SD card |
-  |---|---|---|
-  | seq read 1M | 384 MB/s | 83.6 MB/s |
-  | seq write 1M | 121 MB/s (193 buffered) | 38.5 MB/s |
-  | 4K rand read QD32 | 7952 IOPS | 1714 IOPS |
-  | 4K rand write QD32 | 2706 IOPS | 341 IOPS |
+**Tools** in `tools/`:
 
-  Direct write is not CPU-bound (72 % idle): drive/bridge write path.
-- **Integrity:** 4 GiB urandom write → drop caches → sha256 match; btrfs scrub
-  no errors (343 MiB/s).
-- **TRIM:** drive supports it (deterministic, zeroed); the bridge advertises
-  UNMAP in its LBP VPD page but reports `lbpme=0`, so the kernel set
-  `provisioning_mode=full`. Forced `unmap`: `fstrim` trimmed 232.7 GiB, test
-  file intact, scrub clean. Persisted with a udev rule on the **block** add
-  event (`hosts/unicomplex/configuration.nix`); a `scsi_disk` add rule is
-  overwritten when sd revalidates the disk. After reboot: unmap, DISC-MAX 4G.
-- **Supply:** during SSD I/O VDD_IN min 4.976 V (≤ 872 mA); CPU ×4 stress +
-  sustained SSD write: min **4.944 V**, mean 5.008 V, ≤ 1.17 A (~4.8 W).
-  No vdd-in-monitor warnings.
+| Tool | Purpose |
+| --- | --- |
+| `nano-serial.py` | Log the serial console, or stop U-Boot and run commands at its prompt |
+| `reboot-cycle.sh` | Timed reboots with a health check after each |
+| `boot-menu-pick.py` | Reboot and pick a boot-menu entry over serial |
+| `membw.c` | Memory bandwidth benchmark |
+| `l4t-emc-to-bin.py` | Memory timing table converter (also used by the build) |
+
+The serial tools default to the original author's adapter and host: set
+`NANO_SERIAL` to your adapter's device (e.g. `/dev/serial/by-id/…`) and pass
+your `user@host` to the reboot helpers. Only one program can read the serial
+port at a time; a second reader (including a terminal left open) splits the
+data between them.

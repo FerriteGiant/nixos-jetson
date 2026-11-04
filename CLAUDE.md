@@ -8,8 +8,9 @@ Flake-based NixOS for **unicomplex**, an original Jetson Nano developer kit
 (P3450: P3448-0000 module, P3449 B01 carrier, Tegra210, 4 GB). Headless, no
 GPU/CUDA; it will eventually host Hermes Agent with remote inference.
 Background, hardware evidence and the phased plan:
-`jetson_nano_nixos_hermes_plan.md`. Current state and bring-up findings:
-`README.md`.
+`jetson_nano_nixos_hermes_plan.md`. `README.md`: current system, how to
+reproduce it, how it was worked out (curated, readable). `docs/bringup-log.md`:
+raw dated engineering notes with full measurements.
 
 The style mirrors `../nixos_server/nix-config` (the Linode host).
 
@@ -76,5 +77,7 @@ Only one process may read the serial port at a time (readers split the data).
 
 ## Workflow
 
-Commit sensible, self-contained changes with descriptive messages; keep
-`README.md` (status / bring-up log) up to date with findings.
+Commit sensible, self-contained changes with descriptive messages. Append
+findings to `docs/bringup-log.md` (dated, detailed) and keep `README.md`
+current at a readable level: no serial numbers, MACs, IPs or vendor part
+names there.

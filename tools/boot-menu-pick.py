@@ -4,7 +4,8 @@
 import subprocess, sys, time, serial
 choice = sys.argv[1]
 HOST = sys.argv[2] if len(sys.argv) > 2 else "sirhc@unicomplex"
-s = serial.Serial('/dev/serial/by-id/usb-1a86_USB_Single_Serial_5734003039-if00', 115200, timeout=0.2)
+import os
+s = serial.Serial(os.environ.get("NANO_SERIAL", "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5734003039-if00"), 115200, timeout=0.2)
 s.reset_input_buffer()
 subprocess.Popen(["ssh", HOST, "sudo systemctl reboot"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 t0 = time.time(); buf = b""
