@@ -4,6 +4,7 @@
   imports = [
     ../../modules/jetson-nano.nix
     ../../common-configuration.nix
+    ./storage.nix
   ];
 
   networking.hostName = "unicomplex";
