@@ -305,3 +305,36 @@ Older NixOS generations are in the extlinux menu (5 s timeout).
   are env vars in `modules/jetson-nano.nix`. Test with raised thresholds
   (5050/5080) + stress burst produced exactly: warn → reminders → recovered →
   summary. Check: `journalctl -u vdd-in-monitor -p warning`.
+
+### 2026-11-04 — USB SSD validation
+
+- **Hardware:** WD PC SA530 256 GB M.2 **SATA** SSD (`SDATB8Y256G1001`, fw
+  40102101) in a VIA Labs **VL716** (`2109:0716`) enclosure; `uas` driver at
+  5 Gbit/s through the carrier's internal USB 3 hub. Pre-existing empty btrfs
+  `WD256` (made by Chris 2026-11-04).
+- **Health (smartctl -d sat):** PASSED; 0 reallocated / uncorrectable / CRC
+  errors, error log empty, wear indicator 98, 28 359 power-on h (used drive),
+  34–38 °C. `smartctl -d snt*` probes send ATA PASS-THROUGH(12) (0xa1),
+  which the bridge ignores → 60 s timeout + `uas_eh_device_reset` (seen twice,
+  both from those probes; none during real I/O). Use `-d sat`.
+- **Throughput** (fio, file on btrfs, direct I/O unless noted):
+
+  | | SSD | SD card |
+  |---|---|---|
+  | seq read 1M | 384 MB/s | 83.6 MB/s |
+  | seq write 1M | 121 MB/s (193 buffered) | 38.5 MB/s |
+  | 4K rand read QD32 | 7952 IOPS | 1714 IOPS |
+  | 4K rand write QD32 | 2706 IOPS | 341 IOPS |
+
+  Direct write is not CPU-bound (72 % idle): drive/bridge write path.
+- **Integrity:** 4 GiB urandom write → drop caches → sha256 match; btrfs scrub
+  no errors (343 MiB/s).
+- **TRIM:** drive supports it (deterministic, zeroed); the bridge advertises
+  UNMAP in its LBP VPD page but reports `lbpme=0`, so the kernel set
+  `provisioning_mode=full`. Forced `unmap`: `fstrim` trimmed 232.7 GiB, test
+  file intact, scrub clean. Persisted with a udev rule on the **block** add
+  event (`hosts/unicomplex/configuration.nix`); a `scsi_disk` add rule is
+  overwritten when sd revalidates the disk. After reboot: unmap, DISC-MAX 4G.
+- **Supply:** during SSD I/O VDD_IN min 4.976 V (≤ 872 mA); CPU ×4 stress +
+  sustained SSD write: min **4.944 V**, mean 5.008 V, ≤ 1.17 A (~4.8 W).
+  No vdd-in-monitor warnings.
