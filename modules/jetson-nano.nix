@@ -220,6 +220,38 @@ in
   # no camera input (tegra-video), and their common bus driver (host1x).
   boot.blacklistedKernelModules = [ "nouveau" "tegra_drm" "tegra_video" "host1x" ];
 
+  # Why did the last boot happen? TegraBoot reads (and thereby clears) the
+  # MAX77620 PMIC's NVERC event register, but CBoot records it in its DT as
+  # /chosen/reset/pmic_reset_status, which U-Boot copies into ours
+  # (fdt_copy_node_paths keeps /chosen/reset). Observed: 0x00 clean reboot,
+  # 0x02 watchdog, 0x40/0x50 power pulled. Undervoltage bits on a boot where
+  # nobody unplugged it = brownout. Check: journalctl -b -u pmic-reset-reason
+  systemd.services.pmic-reset-reason = {
+    description = "Log PMIC reset reason (brownout/watchdog detection)";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig.Type = "oneshot";
+    path = [ pkgs.coreutils ];
+    script = ''
+      f=/proc/device-tree/chosen/reset/pmic_reset_status
+      [ -e $f ] || { echo "<4>no $f (bootloader did not pass it)"; exit 0; }
+      v=$(( 0x$(od -An -tx1 $f | tr -d ' \n') ))
+      pmc=$(od -An -tx1 /proc/device-tree/chosen/reset/pmc_reset_status 2>/dev/null | tr -d ' \n')
+      bits=""
+      for b in "0x01 SHDN(shutdown)" "0x02 WTCHDG(watchdog)" "0x04 HDRST(hard-reset)" \
+               "0x08 TOVLD(thermal-overload)" "0x10 MBLSD(low-input-shutdown)" \
+               "0x20 MBO(input-overvoltage)" "0x40 MBU(input-undervoltage)" "0x80 RSTIN(reset-input)"; do
+        m=''${b%% *}; [ $(( v & m )) -ne 0 ] && bits="$bits ''${b#* }"
+      done
+      msg=$(printf "PMIC NVERC=0x%02x%s (PMC reset status 0x%s)" $v "''${bits:+ ->$bits}" "$pmc")
+      if [ $(( v & 0x7a )) -ne 0 ]; then
+        echo "<4>$msg"
+        [ $(( v & 0x50 )) -ne 0 ] && echo "<4>input power dropped: brownout, unless the board was unplugged"
+      else
+        echo "<6>$msg (clean)"
+      fi
+    '';
+  };
+
   # Reboot hang: if the XUSB (USB3) controller is runtime-suspended when the
   # kernel runs its shutdown pass, it gets resumed (firmware reload) and the
   # restart hangs about half the time, until the max77620 watchdog (~128 s)
