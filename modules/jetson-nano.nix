@@ -153,21 +153,61 @@ in
       };
     '';
   }
-    # Headless: disable the display/camera side in the DT too (the modules are
+    # Headless: disable the display/camera side in the DT (the drivers are
     # blacklisted below). Otherwise fw_devlink keeps waiting for them:
-    # i2c@7000c700 (HDMI DDC) needs the dpaux pinmux under host1x, and
-    # tegra-pmc/tegra-mc sync_state() (powering off unused domains) stays
-    # pending on host1x and the MIPI calibration block.
+    # i2c@7000c700 (HDMI DDC) needs the dpaux pinmux, and tegra-pmc/tegra-mc
+    # sync_state() (powering off unused domains) stays pending on unbound
+    # host1x children and the MIPI calibration block. host1x itself stays
+    # enabled only because it hosts i2c@546c0000 ("VI I2C", L4T bus 6), where
+    # the module's INA3221 power monitor lives.
   {
     name = "jetson-nano-headless";
+    dtsText = let
+      off = path: n: ''fragment@${toString n} { target-path = "${path}"; __overlay__ { status = "disabled"; }; };'';
+      nodes = [
+        "/i2c@7000c700" "/mipi@700e3000"
+        "/host1x@50000000/dc@54200000" "/host1x@50000000/dc@54240000"
+        "/host1x@50000000/dpaux@54040000" "/host1x@50000000/dpaux@545c0000"
+        "/host1x@50000000/sor@54540000" "/host1x@50000000/sor@54580000"
+        "/host1x@50000000/vi@54080000" "/host1x@50000000/vic@54340000"
+      ];
+    in ''
+      /dts-v1/;
+      /plugin/;
+      / {
+        compatible = "nvidia,p3450-0000";
+        ${lib.concatStringsSep "
+        " (lib.imap0 (i: p: off p i) nodes)}
+      };
+    '';
+  }
+
+    # INA3221 3-channel power monitor on the P3448 module (as in L4T's
+    # tegra210-porg DT: POM_5V_IN / POM_5V_GPU / POM_5V_CPU, 5 mOhm shunts).
+    # hwmon: `sensors ina3221-*`; in1 = 5 V input rail (brownout margin).
+  {
+    name = "jetson-nano-ina3221";
     dtsText = ''
       /dts-v1/;
       /plugin/;
       / {
         compatible = "nvidia,p3450-0000";
-        fragment@0 { target-path = "/host1x@50000000"; __overlay__ { status = "disabled"; }; };
-        fragment@1 { target-path = "/i2c@7000c700";    __overlay__ { status = "disabled"; }; };
-        fragment@2 { target-path = "/mipi@700e3000";   __overlay__ { status = "disabled"; }; };
+        fragment@0 {
+          target-path = "/host1x@50000000/i2c@546c0000";
+          __overlay__ {
+            #address-cells = <1>;
+            #size-cells = <0>;
+            power-sensor@40 {
+              compatible = "ti,ina3221";
+              reg = <0x40>;
+              #address-cells = <1>;
+              #size-cells = <0>;
+              input@0 { reg = <0>; label = "VDD_IN";  shunt-resistor-micro-ohms = <5000>; };
+              input@1 { reg = <1>; label = "VDD_GPU"; shunt-resistor-micro-ohms = <5000>; };
+              input@2 { reg = <2>; label = "VDD_CPU"; shunt-resistor-micro-ohms = <5000>; };
+            };
+          };
+        };
       };
     '';
   }];
@@ -217,8 +257,8 @@ in
 
   # --- No GPU ---------------------------------------------------------------
   # Headless: no GPU (nouveau), no display controller / HDMI (tegra-drm),
-  # no camera input (tegra-video), and their common bus driver (host1x).
-  boot.blacklistedKernelModules = [ "nouveau" "tegra_drm" "tegra_video" "host1x" ];
+  # no camera input (tegra-video). host1x is needed for the VI I2C bus.
+  boot.blacklistedKernelModules = [ "nouveau" "tegra_drm" "tegra_video" ];
 
   # Why did the last boot happen? TegraBoot reads (and thereby clears) the
   # MAX77620 PMIC's NVERC event register, but CBoot records it in its DT as
