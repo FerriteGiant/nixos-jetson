@@ -85,6 +85,7 @@ in
 {
   imports = [
     "${modulesPath}/installer/sd-card/sd-image.nix"
+    ./board-commands.nix
   ];
 
   # sd-image.nix turns on enableAllHardware, which stuffs ~100 modules into
