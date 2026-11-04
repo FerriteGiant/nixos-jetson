@@ -5,6 +5,7 @@
     ../../modules/jetson-nano.nix
     ../../common-configuration.nix
     ./storage.nix
+    ./hermes.nix
   ];
 
   networking.hostName = "unicomplex";
