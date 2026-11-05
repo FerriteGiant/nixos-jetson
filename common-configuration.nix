@@ -15,7 +15,10 @@
   # /etc/tailscale-authkey (mode 600); tailscaled-autoconnect logs in once.
   services.tailscale.enable = true;
   services.tailscale.authKeyFile = "/etc/tailscale-authkey";
-  services.tailscale.extraUpFlags = [ "--ssh" ];
+  # No Tailscale SSH: OpenSSH (key auth) answers on the tailnet address too,
+  # so there is no browser "check" prompt. `up` flags only apply at first
+  # login, so turn it off explicitly with `tailscale set` on every boot.
+  services.tailscale.extraSetFlags = [ "--ssh=false" ];
 
   networking.usePredictableInterfaceNames = false;
   networking.useDHCP = false;
