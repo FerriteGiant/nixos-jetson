@@ -29,14 +29,20 @@
       terminal.backend = "local";
 
       # Browser UI (the Desktop workspace), served by the gateway itself on
-      # loopback only: no sign-in provider needed, nothing exposed. Reach it
-      # with `ssh -N -L 9120:127.0.0.1:9120 <host>`, then open the one-use link
-      # from `hermes webapp --no-open` (printed links skip the Linux
-      # same-OS-user check that a tunnelled connection, owned by sshd, fails).
+      # loopback only. Reach it with `ssh -N -L 9120:127.0.0.1:9120 <host>`
+      # and open http://hermes.localhost:9120 (browsers resolve *.localhost
+      # to loopback and treat it as a secure context).
+      #
+      # One-use links don't work through a tunnel: on Linux they are only
+      # redeemable over a connection owned by the gateway's user, and a
+      # tunnelled one is owned by sshd. A public_url whose host isn't
+      # localhost/127.0.0.1/::1 turns on the dashboard sign-in instead
+      # (username/password, HERMES_DASHBOARD_BASIC_AUTH_* in the env file).
       webapp = {
         enabled = true;
         host = "127.0.0.1";
         port = 9120;
+        public_url = "http://hermes.localhost:9120";
       };
     };
 
