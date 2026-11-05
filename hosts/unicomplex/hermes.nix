@@ -27,6 +27,17 @@
       # Tool commands run on the Nano, as the hermes user, inside the
       # service's sandbox (ProtectSystem=strict, writes only to stateDir).
       terminal.backend = "local";
+
+      # Browser UI (the Desktop workspace), served by the gateway itself on
+      # loopback only: no sign-in provider needed, nothing exposed. Reach it
+      # with `ssh -N -L 9120:127.0.0.1:9120 <host>`, then open the one-use link
+      # from `hermes webapp --no-open` (printed links skip the Linux
+      # same-OS-user check that a tunnelled connection, owned by sshd, fails).
+      webapp = {
+        enabled = true;
+        host = "127.0.0.1";
+        port = 9120;
+      };
     };
 
     # Tools on the agent's PATH (the package already wraps git, ripgrep, node).
