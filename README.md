@@ -40,6 +40,7 @@ flake.nix                           nixosConfigurations.<host> + packages.aarch6
 common-configuration.nix            user, SSH, Tailscale, sudo, nix settings, packages
 hosts/<host>/configuration.nix      hostname and host-specific hardware quirks
 hosts/<host>/storage.nix            optional USB SSD: mounts, swap, snapshots, trim, scrub
+hosts/<host>/hermes.nix             optional Hermes Agent service (see below)
 modules/jetson-nano.nix             everything board-specific (boot, DT overlays, services)
 modules/board-commands.nix          `voltage` and `bootreason`
 modules/vdd-in-monitor.sh           supply-dip monitor
@@ -210,12 +211,54 @@ without the SSD**; every SSD mount is `nofail`.
   `provisioning_mode=unmap` (see `hosts/<host>/configuration.nix`) fixes
   it. Verify with `fstrim` and a checksum test before relying on it.
 
+### Hermes Agent (optional)
+
+`hosts/<host>/hermes.nix` runs [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+through the NixOS module from its flake, pinned to a tested revision in
+`flake.nix` (upstream treats Nix support as best-effort). Inference is
+remote (OpenRouter by default); the Nano only runs the agent.
+
+- **Service:** native mode (a hardened systemd unit, static `hermes`
+  user), the small `messaging` package variant, local terminal backend
+  (tool commands run on the Nano as `hermes`). Memory is capped with
+  `MemoryHigh`/`MemoryMax`, and the unit requires the `/var/lib/hermes`
+  mount so it never starts on the SD card when the SSD is missing.
+- **State:** `/var/lib/hermes` (the `@hermes` subvolume), so it is in the
+  hourly snapshots.
+- **Secrets:** `/var/lib/hermes/env`, root-only, outside the Nix store,
+  e.g. `OPENROUTER_API_KEY=…`. It is merged into Hermes's `.env` at
+  activation, so run a rebuild after changing it, then restart the service.
+- **CLI:** `hermes` in an interactive shell is a function that runs the
+  real CLI as the `hermes` user from its workspace. Upstream's group-shared
+  setup doesn't hold: Hermes chmods its home to `0700` when it writes
+  credentials, and the CLI refuses to talk to the gateway while the home is
+  group-writable. An activation step keeps it owner-only.
+- **Browser UI:** the gateway serves the Webapp on `127.0.0.1:9120`. From
+  another machine: `ssh -N -L 9120:127.0.0.1:9120 <host>`, then open
+  `http://hermes.localhost:9120` and sign in with the username and password
+  set via `HERMES_DASHBOARD_BASIC_AUTH_{USERNAME,PASSWORD,SECRET}` in the
+  env file. One-use `hermes webapp` links don't work through a tunnel (on
+  Linux they must be redeemed over a connection owned by the gateway's
+  user); the `*.localhost` `public_url` switches on password sign-in
+  instead, and browsers send `*.localhost` to loopback.
+- **Building:** the package needs about a thousand local aarch64 builds
+  (Python packages plus npm builds of the TUI and Webapp). Under qemu
+  user-mode emulation, old qemu (6.2) hung repeatedly in small install
+  steps; set `max-silent-time` so a hang fails instead of stalling. A
+  faster x86 machine with a newer qemu (8.2, e.g. in WSL2) built it in
+  about 20 minutes; its output can be copied to the Nano as a signed binary
+  cache (`nix copy --to file://…`) and realised there with
+  `--option extra-substituters file://…`.
+
 ### Access and updates
 
 - **SSH:** key-only login for the user defined in `common-configuration.nix`;
   password authentication and root login are disabled.
-- **Tailscale (optional):** enabled with Tailscale SSH. It connects
-  automatically once an auth key is placed in `/etc/tailscale-authkey`.
+- **Tailscale (optional):** connects automatically once an auth key is
+  placed in `/etc/tailscale-authkey`. Tailscale SSH is turned off
+  (`tailscale set --ssh=false` on every boot), so the normal OpenSSH key
+  login also answers on the tailnet address, without Tailscale's browser
+  re-approval prompts.
 - **Serial console:** 115200 8N1 on the carrier's debug UART header, via a
   3.3 V UART-to-USB adapter. The console also gets a login prompt, and
   `tools/nano-serial.py` can log it or drive the U-Boot prompt.
