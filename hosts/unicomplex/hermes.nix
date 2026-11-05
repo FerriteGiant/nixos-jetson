@@ -41,10 +41,19 @@
   };
 
   # Group membership gives the admin user access to the workspace and
-  # /var/lib/hermes (2770). It does not give access to HERMES_HOME itself:
-  # the module sets that to 2770, but Hermes chmods it back to 0700 whenever
-  # it writes auth.json (secure_parent_dir() ignores managed mode).
+  # /var/lib/hermes (2770), so the shell function below can cd there. It
+  # does not give access to HERMES_HOME itself, which is owner-only (below;
+  # Hermes also chmods it to 0700 itself whenever it writes auth.json).
   users.users.sirhc.extraGroups = [ config.services.hermes-agent.group ];
+
+  # The module's activation sets HERMES_HOME to 2770 on every switch, but the
+  # CLI then refuses the gateway ("unsafe_control_permissions … writable by
+  # another user"). Nothing needs group access to it (see the shell function
+  # below), so put it back to owner-only right after the module's setup.
+  system.activationScripts.hermes-home-owner-only =
+    lib.stringAfter [ "hermes-agent-setup" ] ''
+      chmod 0700 ${config.services.hermes-agent.stateDir}/.hermes
+    '';
 
   # So `hermes` in an interactive shell runs as the hermes user, from its
   # workspace: same state as the service, and tool commands run as hermes
