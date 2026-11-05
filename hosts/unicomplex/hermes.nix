@@ -21,9 +21,9 @@
 
     settings = {
       # Inference via OpenRouter (the default when model.base_url is unset).
-      # Free tier: rate-limited, and OpenRouter's free endpoints may log
-      # prompts. Supports tool calling (per OpenRouter's model list).
-      model.default = "google/gemma-4-26b-a4b-it:free";
+      # Paid variant: the :free one was unusable (HTTP 429 from the shared
+      # upstream pool). Supports tool calling (per OpenRouter's model list).
+      model.default = "google/gemma-4-26b-a4b-it";
       # Tool commands run on the Nano, as the hermes user, inside the
       # service's sandbox (ProtectSystem=strict, writes only to stateDir).
       terminal.backend = "local";
